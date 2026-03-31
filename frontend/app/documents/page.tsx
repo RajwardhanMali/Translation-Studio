@@ -1,0 +1,312 @@
+'use client'
+
+import { useEffect, useMemo, useState } from 'react'
+import { useRouter } from 'next/navigation'
+import { ArrowRight, File, FileText, FolderOpen, Loader2, RefreshCw, Trash2 } from 'lucide-react'
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+} from '@/components/ui/alert-dialog'
+import { AppShell } from '@/components/app-shell'
+import { Badge } from '@/components/ui/badge'
+import { Button } from '@/components/ui/button'
+import { Card } from '@/components/ui/card'
+import { Spinner } from '@/components/ui/spinner'
+import { useToast } from '@/hooks/use-toast'
+import { deleteDocument, getDocuments, type DocumentSummary } from '@/lib/api'
+import { cn } from '@/lib/utils'
+
+function formatRelativeTime(value: string) {
+  const target = new Date(value).getTime()
+  const now = Date.now()
+
+  // Handle invalid dates
+  if (isNaN(target)) {
+    return 'Unknown'
+  }
+
+  const diffSeconds = Math.round((now - target) / 1000)
+  const absSeconds = Math.abs(diffSeconds)
+  const formatter = new Intl.RelativeTimeFormat('en', { numeric: 'auto' })
+  const ranges: Array<[Intl.RelativeTimeFormatUnit, number]> = [
+    ['year', 31536000],
+    ['month', 2592000],
+    ['week', 604800],
+    ['day', 86400],
+    ['hour', 3600],
+    ['minute', 60],
+    ['second', 1],
+  ]
+
+  for (const [unit, seconds] of ranges) {
+    if (absSeconds >= seconds || unit === 'second') {
+      return formatter.format(Math.round(diffSeconds / seconds), unit)
+    }
+  }
+
+  return 'just now'
+}
+
+function FileTypeBadge({ fileType }: { fileType: DocumentSummary['file_type'] }) {
+  return (
+    <Badge
+      variant="outline"
+      className={cn(
+        'rounded-full px-2.5 py-1 text-[11px] font-semibold uppercase',
+        fileType === 'pdf'
+          ? 'border-rose-200 bg-rose-50 text-rose-700 dark:border-rose-900/60 dark:bg-rose-950/40 dark:text-rose-200'
+          : 'border-sky-200 bg-sky-50 text-sky-700 dark:border-sky-900/60 dark:bg-sky-950/40 dark:text-sky-200'
+      )}
+    >
+      {fileType}
+    </Badge>
+  )
+}
+
+function StackedProgress({ document }: { document: DocumentSummary }) {
+  const total = Math.max(document.segments.total, 1)
+  const pendingWidth = (document.segments.pending / total) * 100
+  const reviewedWidth = (document.segments.reviewed / total) * 100
+  const approvedWidth = (document.segments.approved / total) * 100
+
+  return (
+    <div className="space-y-2.5">
+      <div className="h-2 overflow-hidden rounded-full bg-muted">
+        <div className="flex h-full w-full">
+          <div className="bg-slate-300 dark:bg-slate-700" style={{ width: `${pendingWidth}%` }} />
+          <div className="bg-amber-400" style={{ width: `${reviewedWidth}%` }} />
+          <div className="bg-emerald-500" style={{ width: `${approvedWidth}%` }} />
+        </div>
+      </div>
+      <div className="flex items-center justify-between text-xs text-muted-foreground">
+        <span>{document.translation_progress.toFixed(1)}% translated</span>
+        <span>{document.segments.total} segments</span>
+      </div>
+    </div>
+  )
+}
+
+function DocumentCard({
+  document,
+  deleting,
+  onOpen,
+  onDelete,
+}: {
+  document: DocumentSummary
+  deleting: boolean
+  onOpen: () => void
+  onDelete: () => Promise<void>
+}) {
+  const FileIcon = document.file_type === 'pdf' ? FileText : File
+
+  return (
+    <Card className="glass-panel rounded-3xl p-5">
+      <div className="flex flex-col gap-5">
+        <div className="flex items-start justify-between gap-4">
+          <div className="flex min-w-0 items-start gap-3">
+            <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl bg-muted">
+              <FileIcon className="h-5 w-5 text-foreground" />
+            </div>
+            <div className="min-w-0">
+              <p className="truncate text-base font-semibold text-foreground">{document.filename}</p>
+              <div className="mt-1 flex flex-wrap items-center gap-2">
+                <FileTypeBadge fileType={document.file_type} />
+                <span className="text-xs text-muted-foreground">{document.blocks_count} blocks</span>
+              </div>
+            </div>
+          </div>
+          <div className="text-right">
+            <p className="text-xs text-muted-foreground">Progress</p>
+            <p className="text-lg font-semibold text-foreground">{Math.round(document.translation_progress)}%</p>
+          </div>
+        </div>
+
+        <StackedProgress document={document} />
+
+        <div className="grid grid-cols-3 gap-2 text-xs">
+          <div className="rounded-2xl bg-muted/70 px-3 py-2 text-muted-foreground">Pending {document.segments.pending}</div>
+          <div className="rounded-2xl bg-muted/70 px-3 py-2 text-muted-foreground">Reviewed {document.segments.reviewed}</div>
+          <div className="rounded-2xl bg-muted/70 px-3 py-2 text-muted-foreground">Approved {document.segments.approved}</div>
+        </div>
+
+        <div className="flex justify-end gap-2">
+          <Button variant="outline" className="rounded-xl" onClick={onOpen}>
+            Open
+            <ArrowRight className="ml-1.5 h-4 w-4" />
+          </Button>
+          <AlertDialog>
+            <AlertDialogTrigger asChild>
+              <Button variant="outline" className="rounded-xl border-red-200 text-red-700 hover:bg-red-50 hover:text-red-700 dark:border-red-900/60 dark:text-red-200 dark:hover:bg-red-950/40">
+                {deleting ? <Spinner className="mr-1.5 h-4 w-4" /> : <Trash2 className="mr-1.5 h-4 w-4" />}
+                Delete
+              </Button>
+            </AlertDialogTrigger>
+            <AlertDialogContent>
+              <AlertDialogHeader>
+                <AlertDialogTitle>Delete document?</AlertDialogTitle>
+                <AlertDialogDescription>
+                  {document.filename} will be removed from your library. This action cannot be undone.
+                </AlertDialogDescription>
+              </AlertDialogHeader>
+              <AlertDialogFooter>
+                <AlertDialogCancel>Cancel</AlertDialogCancel>
+                <AlertDialogAction
+                  onClick={(event) => {
+                    event.preventDefault()
+                    void onDelete()
+                  }}
+                  className="bg-red-600 hover:bg-red-700"
+                >
+                  {deleting ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
+                  Delete
+                </AlertDialogAction>
+              </AlertDialogFooter>
+            </AlertDialogContent>
+          </AlertDialog>
+        </div>
+      </div>
+    </Card>
+  )
+}
+
+export default function DocumentsPage() {
+  const router = useRouter()
+  const { toast } = useToast()
+  const [documents, setDocuments] = useState<DocumentSummary[]>([])
+  const [loading, setLoading] = useState(true)
+  const [refreshing, setRefreshing] = useState(false)
+  const [deletingId, setDeletingId] = useState<string | null>(null)
+
+  const loadDocuments = async (silent = false) => {
+    if (silent) setRefreshing(true)
+    else setLoading(true)
+
+    try {
+      const data = await getDocuments()
+      setDocuments(data)
+    } catch {
+      toast({
+        title: 'Failed to load documents',
+        description: 'Could not fetch your document library from the backend.',
+        variant: 'destructive',
+      })
+      setDocuments([])
+    } finally {
+      setLoading(false)
+      setRefreshing(false)
+    }
+  }
+
+  useEffect(() => {
+    void loadDocuments()
+    const interval = window.setInterval(() => {
+      void loadDocuments(true)
+    }, 30000)
+    return () => window.clearInterval(interval)
+  }, [])
+
+  const totals = useMemo(
+    () =>
+      documents.reduce(
+        (acc, doc) => {
+          acc.total += 1
+          acc.pending += doc.segments.pending
+          acc.reviewed += doc.segments.reviewed
+          acc.approved += doc.segments.approved
+          return acc
+        },
+        { total: 0, pending: 0, reviewed: 0, approved: 0 }
+      ),
+    [documents]
+  )
+
+  const handleDelete = async (id: string) => {
+    setDeletingId(id)
+    try {
+      await deleteDocument(id)
+      setDocuments((prev) => prev.filter((doc) => doc.id !== id))
+      toast({ title: 'Document deleted', description: 'The document was removed from your library.' })
+    } catch {
+      toast({
+        title: 'Delete failed',
+        description: 'The document could not be deleted. Please try again.',
+        variant: 'destructive',
+      })
+    } finally {
+      setDeletingId(null)
+    }
+  }
+
+  return (
+    <AppShell
+      title="Documents"
+      subtitle="Browse uploaded files, track progress, and reopen any document."
+      actions={
+        <div className="flex gap-2">
+          <Button variant="outline" className="rounded-xl" onClick={() => void loadDocuments(true)} disabled={refreshing}>
+            <RefreshCw className={cn('mr-1.5 h-4 w-4', refreshing && 'animate-spin')} />
+            Refresh
+          </Button>
+          <Button className="rounded-xl" onClick={() => router.push('/')}>
+            Upload Document
+          </Button>
+        </div>
+      }
+    >
+      <div className="space-y-5">
+        <div className="grid gap-4 md:grid-cols-4">
+          {[
+            { label: 'Documents', value: totals.total },
+            { label: 'Pending', value: totals.pending },
+            { label: 'Reviewed', value: totals.reviewed },
+            { label: 'Approved', value: totals.approved },
+          ].map((item) => (
+            <Card key={item.label} className="rounded-2xl border-border/70 p-4">
+              <p className="text-xs uppercase tracking-[0.18em] text-muted-foreground">{item.label}</p>
+              <p className="mt-2 text-2xl font-semibold text-foreground">{item.value}</p>
+            </Card>
+          ))}
+        </div>
+
+        {loading ? (
+          <div className="glass-panel flex flex-col items-center gap-4 rounded-3xl py-24">
+            <Spinner className="h-8 w-8 text-primary" />
+            <p className="text-sm text-muted-foreground">Loading documents...</p>
+          </div>
+        ) : documents.length === 0 ? (
+          <Card className="glass-panel flex flex-col items-center gap-4 rounded-3xl py-20 text-center">
+            <div className="flex h-16 w-16 items-center justify-center rounded-3xl bg-muted">
+              <FolderOpen className="h-8 w-8 text-muted-foreground" />
+            </div>
+            <div className="space-y-1">
+              <p className="text-lg font-semibold text-foreground">No documents yet</p>
+              <p className="text-sm text-muted-foreground">Upload one to get started.</p>
+            </div>
+            <Button className="rounded-xl" onClick={() => router.push('/')}>
+              Upload Document
+            </Button>
+          </Card>
+        ) : (
+          <div className="grid gap-4 xl:grid-cols-2">
+            {documents.map((document) => (
+              <DocumentCard
+                key={document.id}
+                document={document}
+                deleting={deletingId === document.id}
+                onOpen={() => router.push(`/translate?doc=${document.id}`)}
+                onDelete={() => handleDelete(document.id)}
+              />
+            ))}
+          </div>
+        )}
+      </div>
+    </AppShell>
+  )
+}
