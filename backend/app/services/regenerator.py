@@ -273,9 +273,14 @@ def regenerate_docx(
                 continue
 
             if btype == "image":
-                # Images cannot be re-embedded without the original binary.
-                # Insert a placeholder paragraph.
-                doc.add_paragraph(f"[Image — page {skip_seg.get('format_snapshot',{}).get('page','')+1 if skip_seg.get('format_snapshot',{}).get('page') is not None else '?'}]")
+                src = skip_seg.get("format_snapshot", {}).get("src")
+                if src and Path(src).exists():
+                    try:
+                        doc.add_picture(src, width=Inches(6.0))
+                    except Exception as e:
+                        logger.warning(f"Failed to add image to DOCX: {e}")
+                else:
+                    doc.add_paragraph(f"[Image — missing: {src}]")
                 continue
             continue
 
@@ -287,6 +292,26 @@ def regenerate_docx(
         btype      = first_seg.get("block_type", "paragraph")
         seg_type   = first_seg.get("type", "sentence")
         fmt_snap   = first_seg.get("format_snapshot", {})
+
+        # ── Images with Translatable Text ────────────────────────────────────
+        if btype == "image" or seg_type == "image":
+            src = fmt_snap.get("src")
+            if src and Path(src).exists():
+                try:
+                    doc.add_picture(src, width=Inches(6.0))
+                except Exception as e:
+                    logger.warning(f"Failed to add translatable image to DOCX: {e}")
+            else:
+                doc.add_paragraph(f"[Image — missing: {src}]")
+                
+            translated = _resolved_text(first_seg)
+            if translated:
+                p = doc.add_paragraph(f"Caption: {translated}")
+                try:
+                    p.style = "Caption"
+                except KeyError:
+                    pass
+            continue
 
         # ── Table cells ──────────────────────────────────────────────────────
         if seg_type == "table_cell":
@@ -442,6 +467,24 @@ def regenerate_pdf(
             rl_y_bottom = ph - y1_pdf
             block_width = x1 - x0
 
+            btype = first_seg.get("block_type", "paragraph")
+            if btype == "image":
+                src = snap.get("src")
+                if src and Path(src).exists():
+                    try:
+                        c.drawImage(src, x0, rl_y_bottom, width=x1-x0, height=rl_y_top-rl_y_bottom, preserveAspectRatio=True)
+                    except Exception as e:
+                        logger.warning(f"Failed to draw image on PDF: {e}")
+                else:
+                    c.rect(x0, rl_y_bottom, x1 - x0, rl_y_top - rl_y_bottom)
+                
+                translated_text = _resolved_text(first_seg)
+                if translated_text:
+                    c.setFont("Helvetica", 9)
+                    c.setFillColorRGB(0.2, 0.2, 0.2)
+                    c.drawString(x0, rl_y_bottom - 12, f"Caption: {translated_text}")
+                continue
+
             # Join translated sentences
             translated_parts = [
                 _resolved_text(s)
@@ -500,13 +543,20 @@ def regenerate_pdf(
                     x0, y0_pdf, x1, y1_pdf = bbox
                     rl_y_top    = ph - y0_pdf
                     rl_y_bottom = ph - y1_pdf
-                    # Draw a light grey placeholder rectangle
-                    c.setStrokeColorRGB(0.8, 0.8, 0.8)
-                    c.setFillColorRGB(0.95, 0.95, 0.95)
-                    c.rect(x0, rl_y_bottom, x1 - x0, rl_y_top - rl_y_bottom, fill=1, stroke=1)
-                    c.setFillColorRGB(0.5, 0.5, 0.5)
-                    c.setFont("Helvetica", 8)
-                    c.drawString(x0 + 4, rl_y_bottom + 4, "[Image]")
+                    src = snap.get("src")
+                    if src and Path(src).exists():
+                        try:
+                            c.drawImage(src, x0, rl_y_bottom, width=x1-x0, height=rl_y_top-rl_y_bottom, preserveAspectRatio=True)
+                        except Exception as e:
+                            logger.warning(f"Failed to draw skip-image on PDF: {e}")
+                    else:
+                        # Draw a light grey placeholder rectangle
+                        c.setStrokeColorRGB(0.8, 0.8, 0.8)
+                        c.setFillColorRGB(0.95, 0.95, 0.95)
+                        c.rect(x0, rl_y_bottom, x1 - x0, rl_y_top - rl_y_bottom, fill=1, stroke=1)
+                        c.setFillColorRGB(0.5, 0.5, 0.5)
+                        c.setFont("Helvetica", 8)
+                        c.drawString(x0 + 4, rl_y_bottom + 4, "[Image]")
 
         c.showPage()   # end this page
 

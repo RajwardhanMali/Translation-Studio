@@ -281,17 +281,26 @@ def translate_batch(
         logger.info("All segments resolved from TM — no LLM calls needed.")
         return segments
 
+    # Deduplicate in-flight to save tokens but retain full layout data
+    unique_texts = {}
+    for seg in needs_llm:
+        t = seg.get("text", "").strip()
+        if t not in unique_texts:
+            unique_texts[t] = []
+        unique_texts[t].append(seg)
+    unique_needs_llm = [segs[0] for segs in unique_texts.values()]
+
     logger.info(
-        f"Translating {len(needs_llm)} segments via LLM "
-        f"({len(exact_hits)} resolved from TM). "
+        f"Translating {len(unique_needs_llm)} unique segments via LLM "
+        f"(from {len(needs_llm)} total pending, {len(exact_hits)} resolved from TM). "
         f"Backend: {LLM_BACKEND}, batch_size: {BATCH_SIZE}"
     )
 
     # Group into batches of BATCH_SIZE — each batch = 1 API call
-    total_batches = (len(needs_llm) + BATCH_SIZE - 1) // BATCH_SIZE
+    total_batches = (len(unique_needs_llm) + BATCH_SIZE - 1) // BATCH_SIZE
 
     for batch_idx in range(total_batches):
-        batch = needs_llm[batch_idx * BATCH_SIZE : (batch_idx + 1) * BATCH_SIZE]
+        batch = unique_needs_llm[batch_idx * BATCH_SIZE : (batch_idx + 1) * BATCH_SIZE]
 
         # Use the most common glossary fragment in this batch (they're usually same)
         glossary_fragment = batch[0].get("glossary_fragment", "") if batch else ""
@@ -330,6 +339,12 @@ def translate_batch(
 
         if on_chunk_done:
             on_chunk_done(batch_idx + 1, total_batches)
+
+    # Propagate translations to duplicate segments
+    for seg_list in unique_texts.values():
+        target = seg_list[0].get("translated_text", "")
+        for dup_seg in seg_list[1:]:
+            dup_seg["translated_text"] = target
 
     return segments
 

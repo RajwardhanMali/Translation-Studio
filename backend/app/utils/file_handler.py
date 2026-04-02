@@ -19,13 +19,14 @@ PARSED_DIR       = BASE_DIR / "parsed_docs"
 SEGMENTED_DIR    = BASE_DIR / "segmented_docs"
 FAISS_DIR        = BASE_DIR / "faiss_index"
 DATASETS_DIR     = BASE_DIR / "datasets"
+IMAGES_DIR       = BASE_DIR / "images"
 GLOSSARY_PATH    = BASE_DIR / "glossary.json"
 FINE_TUNE_PATH   = DATASETS_DIR / "fine_tune.jsonl"
 EXPORTS_DIR = BASE_DIR / "exported_docs"
 EXPORTS_DIR.mkdir(parents=True, exist_ok=True)
 
 # Ensure all directories exist at import time
-for _dir in [UPLOADS_DIR, PARSED_DIR, SEGMENTED_DIR, FAISS_DIR, DATASETS_DIR]:
+for _dir in [UPLOADS_DIR, PARSED_DIR, SEGMENTED_DIR, FAISS_DIR, DATASETS_DIR, IMAGES_DIR]:
     _dir.mkdir(parents=True, exist_ok=True)
 
 
@@ -142,6 +143,12 @@ def save_glossary(data: Dict) -> None:
 
 def get_upload_path(filename: str) -> Path:
     return UPLOADS_DIR / filename
+
+def get_image_path(document_id: str, image_name: str) -> Path:
+    """Get the path to store a local extracted image."""
+    doc_img_dir = IMAGES_DIR / document_id
+    doc_img_dir.mkdir(parents=True, exist_ok=True)
+    return doc_img_dir / image_name
 
 
 # ---------------------------------------------------------------------------

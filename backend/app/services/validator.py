@@ -92,38 +92,52 @@ def _spell_check(text: str) -> List[Dict]:
     if checker is None:
         return []
 
-    # Only check real words: 3+ chars, all alpha (no mixed alphanumeric like "GPT4")
-    words = re.findall(r"\b[a-zA-Z]{3,}\b", text)
-
-    # Filter: skip ALLCAPS acronyms, Title-Case proper-noun candidates, whitelist
-    candidates = [
-        w for w in words
-        if not w.isupper()                        # skip ALL-CAPS
-        and not w[0].isupper()                    # skip Proper Noun candidates
-        and w.lower() not in _SPELL_WHITELIST
-    ]
+    # Find words with their positions to understand context
+    candidates = []
+    for match in re.finditer(r"\b[a-zA-Z]{3,}\b", text):
+        w = match.group(0)
+        if w.isupper() or w.lower() in _SPELL_WHITELIST:
+            continue
+            
+        start_idx = match.start()
+        # Heuristic for start of sentence
+        is_first_word = (start_idx == 0)
+        if not is_first_word:
+            prefix = text[:start_idx].rstrip()
+            if not prefix or prefix[-1] in ".!?\n":
+                is_first_word = True
+                
+        # If it's capitalized but NOT the first word, assume Proper Noun and skip
+        if w[0].isupper() and not is_first_word:
+            continue
+            
+        candidates.append(w)
 
     if not candidates:
         return []
 
-    misspelled = checker.unknown(candidates)
+    # checker.unknown() returns lowercase words, so we need reverse mapping
+    lower_to_orig = {w.lower(): w for w in candidates}
+    
+    misspelled = checker.unknown([w.lower() for w in candidates])
     issues = []
-    for word in misspelled:
-        correction = checker.correction(word)
-        # Skip if the checker has no better suggestion (returns the word itself or None)
-        if not correction or correction == word:
+    for word_lc in misspelled:
+        orig_word = lower_to_orig.get(word_lc, word_lc)
+        correction = checker.correction(word_lc)
+        
+        # Skip if the checker has no better suggestion or it's just a case variant
+        if not correction or correction == word_lc:
             continue
-        # Skip if the "correction" is just a case variant
-        if correction.lower() == word.lower():
+        if correction.lower() == word_lc.lower():
             continue
 
         issues.append({
             "issue_type": "spelling",
-            "issue":      f"Possible misspelling: '{word}'",
+            "issue":      f"Possible misspelling: '{orig_word}'",
             "suggestion": f"Did you mean '{correction}'?",
-            "severity":   "warning",    # downgraded from error — humans decide
-            "offset":     text.find(word),
-            "length":     len(word),
+            "severity":   "warning",
+            "offset":     text.find(orig_word),
+            "length":     len(orig_word),
         })
     return issues
 

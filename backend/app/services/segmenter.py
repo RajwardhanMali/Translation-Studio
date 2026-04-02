@@ -42,7 +42,7 @@ SPACY_MODEL = "en_core_web_sm"
 MIN_SEGMENT_CHARS = 3
 
 # Block types that we do NOT translate — just pass through in reconstruction
-SKIP_BLOCK_TYPES = {"spacer", "table_start", "table_end", "image", "header_footer"}
+SKIP_BLOCK_TYPES = {"spacer", "table_start", "table_end", "header_footer"}
 
 
 def get_nlp():
@@ -98,6 +98,18 @@ def _extract_format_snapshot(block: Dict[str, Any]) -> Dict[str, Any]:
 
     # Table cell extras
     if block.get("block_type") == "table_cell":
+        snapshot["table_index"]    = block.get("table_index")
+        snapshot["table_block_id"] = block.get("table_block_id")
+        snapshot["row"]            = block.get("row")
+        snapshot["col"]            = block.get("col")
+
+    # Images
+    if block.get("block_type") == "image":
+        snapshot["src"]          = block.get("src")
+        snapshot["bbox"]         = block.get("bbox", [])
+        snapshot["page"]         = block.get("page", 0)
+        snapshot["page_width"]   = block.get("page_width", 595.0)
+        snapshot["page_height"]  = block.get("page_height", 842.0)
         snapshot["table_index"]    = block.get("table_index")
         snapshot["table_block_id"] = block.get("table_block_id")
         snapshot["row"]            = block.get("row")
@@ -165,11 +177,6 @@ def segment_blocks(blocks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             return True
         if _is_noise(text):
             return False
-        h = hashlib.md5(_normalise(text).encode()).hexdigest()
-        if h in seen_hashes:
-            logger.debug(f"Duplicate skipped: '{text[:50]}'")
-            return False
-        seen_hashes.add(h)
         segments.append(seg)
         return True
 
@@ -206,6 +213,38 @@ def segment_blocks(blocks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                 "col_count":      block.get("col_count"),
                 "col_widths":     block.get("col_widths"),
             })
+            continue
+
+        # ── Images (Translate OCR if present, otherwise skip) ───────────────
+        if block_type == "image":
+            if text:
+                _add(_make_segment(
+                    document_id=doc_id,
+                    text=text,
+                    seg_type="sentence",
+                    block_index=block_index,
+                    sentence_index=None,
+                    parent_id=block_id,
+                    block_type=block_type,
+                    format_snapshot=fmt
+                ))
+            else:
+                segments.append({
+                    "id":             str(uuid.uuid4()),
+                    "document_id":    doc_id,
+                    "text":           "",
+                    "type":           "image",
+                    "translated_text": None,
+                    "correction":     None,
+                    "final_text":     None,
+                    "status":         "skip",
+                    "parent_id":      block_id,
+                    "block_type":     block_type,
+                    "position":       {"block_index": block_index, "sentence_index": None, "phrase_index": None},
+                    "format_snapshot": fmt,
+                    "tm_match_type":  None,
+                    "tm_score":       None,
+                })
             continue
 
         # ── Headings ────────────────────────────────────────────────────────

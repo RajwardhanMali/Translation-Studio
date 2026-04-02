@@ -28,6 +28,8 @@ import uuid
 import re
 from pathlib import Path
 from typing import List, Dict, Any, Optional
+from app.utils.file_handler import get_image_path
+from app.services.ocr_engine import extract_text_from_image
 
 logger = logging.getLogger(__name__)
 
@@ -167,6 +169,37 @@ def parse_docx(filepath: Path, document_id: str) -> List[Dict[str, Any]]:
         # ── Paragraphs / Headings ────────────────────────────────────────────
         if tag == "p":
             para = DocxParagraph(child, doc)
+            
+            # Extract images inline
+            images_in_para = []
+            if getattr(doc.part, "related_parts", None):
+                for run in para.runs:
+                    xml = run._element.xml
+                    if "w:drawing" in xml:
+                        match = re.search(r'r:embed="([^"]+)"', xml)
+                        if match:
+                            rid = match.group(1)
+                            part = doc.part.related_parts.get(rid)
+                            if part and part.content_type.startswith("image/"):
+                                ext = part.content_type.split("/")[-1]
+                                img_name = f"img_{document_id}_{block_index}_{len(images_in_para)}.{ext}"
+                                img_path = get_image_path(document_id, img_name)
+                                with open(img_path, "wb") as f:
+                                    f.write(part.blob)
+                                images_in_para.append(img_path)
+
+            for img_path in images_in_para:
+                ocr_text = extract_text_from_image(img_path)
+                blocks.append({
+                    "id": str(uuid.uuid4()),
+                    "document_id": document_id,
+                    "block_type": "image",
+                    "text": ocr_text,
+                    "src": str(img_path),
+                    "position": {"block_index": block_index, "sentence_index": None, "phrase_index": None},
+                })
+                block_index += 1
+
             # Collect runs with per-run formatting
             runs_data = []
             full_text_parts = []
@@ -251,8 +284,14 @@ def parse_docx(filepath: Path, document_id: str) -> List[Dict[str, Any]]:
             })
             block_index += 1
 
+            seen_tc = set()
             for r_idx, row in enumerate(tbl.rows):
                 for c_idx, cell in enumerate(row.cells):
+                    tc = cell._tc
+                    if tc in seen_tc:
+                        continue
+                    seen_tc.add(tc)
+                    
                     # Collect paragraphs inside each cell
                     cell_runs = []
                     cell_text_parts = []
@@ -400,16 +439,83 @@ def parse_pdf(filepath: Path, document_id: str) -> List[Dict[str, Any]]:
         text_blocks = [b for b in page_blocks if b.get("type") == 0]
         image_blocks= [b for b in page_blocks if b.get("type") == 1]
 
+        # ── Table blocks ────────────────────────────────────────────────────
+        tabs = page.find_tables()
+        table_bboxes = []
+        if tabs:
+            for t_idx, tab in enumerate(tabs.tables):
+                table_bboxes.append(tab.bbox)
+                
+                table_block_id = str(uuid.uuid4())
+                blocks.append({
+                    "id":           table_block_id,
+                    "document_id":  document_id,
+                    "block_type":   "table_start",
+                    "text":         "",
+                    "table_index":  t_idx,
+                    "row_count":    len(tab.cells) if tab.cells else 0,
+                    "col_count":    len(tab.cells[0]) if tab.cells and tab.cells[0] else 0,
+                    "page":         page_num,
+                    "position":     {"block_index": block_index, "sentence_index": None, "phrase_index": None},
+                })
+                block_index += 1
+                
+                for r_idx, row in enumerate(tab.extract() or []):
+                    for c_idx, cell_text in enumerate(row or []):
+                        if cell_text is None:
+                            cell_text = ""
+                        blocks.append({
+                            "id":           str(uuid.uuid4()),
+                            "document_id":  document_id,
+                            "block_type":   "table_cell",
+                            "text":         cell_text.strip().replace("\n", " "),
+                            "table_index":  t_idx,
+                            "table_block_id": table_block_id,
+                            "row":          r_idx,
+                            "col":          c_idx,
+                            "formatting":   {},
+                            "position":     {"block_index": block_index, "sentence_index": None, "phrase_index": None},
+                        })
+                        block_index += 1
+                        
+                blocks.append({
+                    "id":          str(uuid.uuid4()),
+                    "document_id": document_id,
+                    "block_type":  "table_end",
+                    "text":        "",
+                    "table_index": t_idx,
+                    "position":    {"block_index": block_index, "sentence_index": None, "phrase_index": None},
+                })
+                block_index += 1
+
+        # Sort text blocks in reading order: top→bottom, left→right
         text_blocks.sort(key=lambda b: (round(b["bbox"][1] / 20) * 20, b["bbox"][0]))
 
         # ── Image blocks ────────────────────────────────────────────────────
-        for img_blk in image_blocks:
+        for img_idx, img_blk in enumerate(image_blocks):
             bbox = img_blk.get("bbox", [0, 0, 0, 0])
+            img_bytes = img_blk.get("image")
+            img_path_str = ""
+            ocr_text = ""
+            
+            if img_bytes:
+                img_ext = img_blk.get("ext", "png")
+                img_name = f"img_{document_id}_{page_num}_{img_idx}.{img_ext}"
+                try:
+                    img_path = get_image_path(document_id, img_name)
+                    with open(img_path, "wb") as f:
+                        f.write(img_bytes)
+                    img_path_str = str(img_path)
+                    ocr_text = extract_text_from_image(img_path)
+                except Exception as e:
+                    logger.warning(f"Failed to process image: {e}")
+
             blocks.append({
                 "id":           str(uuid.uuid4()),
                 "document_id":  document_id,
                 "block_type":   "image",
-                "text":         "",
+                "text":         ocr_text,
+                "src":          img_path_str,
                 "page":         page_num,
                 "page_width":   page_width,
                 "page_height":  page_height,
@@ -418,8 +524,20 @@ def parse_pdf(filepath: Path, document_id: str) -> List[Dict[str, Any]]:
             })
             block_index += 1
 
+        # Helper to check if block is in table
+        def _in_table(bx):
+            bx0, by0, bx1, by1 = bx
+            cx, cy = (bx0+bx1)/2, (by0+by1)/2
+            for tx0, ty0, tx1, ty1 in table_bboxes:
+                if tx0 <= cx <= tx1 and ty0 <= cy <= ty1:
+                    return True
+            return False
+
         # ── Text blocks ─────────────────────────────────────────────────────
         for pdf_block in text_blocks:
+            if _in_table(pdf_block.get("bbox", [0, 0, 0, 0])):
+                continue
+            
             lines_data = []
             all_spans  = []
             full_text_parts = []
