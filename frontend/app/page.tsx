@@ -1,325 +1,280 @@
-'use client'
-
-import { useState, useCallback, useRef } from 'react'
-import { useRouter } from 'next/navigation'
-import { Upload, FileText, File, CheckCircle2, AlertCircle, X, ArrowRight } from 'lucide-react'
-import { AppShell } from '@/components/app-shell'
+import Link from 'next/link'
+import { auth } from '@clerk/nextjs/server'
+import { ArrowRight, CheckCircle2, FileText, FolderKanban, Globe2, Languages, ShieldCheck, Sparkles, Workflow } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
-import { Progress } from '@/components/ui/progress'
-import { Badge } from '@/components/ui/badge'
-import { useToast } from '@/hooks/use-toast'
-import { uploadDocument } from '@/lib/api'
-import { cn } from '@/lib/utils'
 
-type UploadState = 'idle' | 'dragging' | 'uploading' | 'success' | 'error'
+const featureCards = [
+  {
+    icon: Workflow,
+    title: 'Structured translation flow',
+    description: 'Upload, validate, translate, review, and export without stitching together multiple tools.',
+  },
+  {
+    icon: ShieldCheck,
+    title: 'Reviewer control',
+    description: 'Segment-level approvals, glossary checks, and cleaner validation cues keep quality visible.',
+  },
+  {
+    icon: Globe2,
+    title: 'Built for teams',
+    description: 'Share document access, keep collaborators aligned, and bring people into the same workflow fast.',
+  },
+]
 
-const ACCEPTED_TYPES = {
-  'application/pdf': '.pdf',
-  'application/vnd.openxmlformats-officedocument.wordprocessingml.document': '.docx',
-}
+const steps = [
+  'Upload a PDF or DOCX and preserve document structure.',
+  'Run validation to surface source issues before translation.',
+  'Generate translations, inspect TM suggestions, and edit inline.',
+  'Approve final copy and export polished deliverables.',
+]
 
-function formatBytes(bytes: number) {
-  if (bytes === 0) return '0 B'
-  const k = 1024
-  const sizes = ['B', 'KB', 'MB', 'GB']
-  const i = Math.floor(Math.log(bytes) / Math.log(k))
-  return `${parseFloat((bytes / Math.pow(k, i)).toFixed(1))} ${sizes[i]}`
-}
-
-export default function UploadPage() {
-  const router = useRouter()
-  const { toast } = useToast()
-  const inputRef = useRef<HTMLInputElement>(null)
-
-  const [uploadState, setUploadState] = useState<UploadState>('idle')
-  const [selectedFile, setSelectedFile] = useState<File | null>(null)
-  const [progress, setProgress] = useState(0)
-  const [uploadResult, setUploadResult] = useState<{
-    document_id: string
-    blocks_parsed: number
-    filename: string
-  } | null>(null)
-  const [errorMsg, setErrorMsg] = useState('')
-
-  const validateFile = (file: File): string | null => {
-    if (!Object.keys(ACCEPTED_TYPES).includes(file.type)) {
-      return 'Only PDF and DOCX files are supported.'
-    }
-    if (file.size > 50 * 1024 * 1024) {
-      return 'File size must be under 50 MB.'
-    }
-    return null
-  }
-
-  const handleFile = (file: File) => {
-    const err = validateFile(file)
-    if (err) {
-      toast({ title: 'Invalid file', description: err, variant: 'destructive' })
-      return
-    }
-    setSelectedFile(file)
-    setUploadState('idle')
-    setErrorMsg('')
-    setUploadResult(null)
-    setProgress(0)
-  }
-
-  const onDrop = useCallback((e: React.DragEvent) => {
-    e.preventDefault()
-    setUploadState('idle')
-    const file = e.dataTransfer.files[0]
-    if (file) handleFile(file)
-  }, [])
-
-  const onDragOver = (e: React.DragEvent) => {
-    e.preventDefault()
-    setUploadState('dragging')
-  }
-
-  const onDragLeave = () => setUploadState('idle')
-
-  const onInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0]
-    if (file) handleFile(file)
-  }
-
-  const handleUpload = async () => {
-    if (!selectedFile) return
-    setUploadState('uploading')
-    setProgress(0)
-
-    try {
-      // Simulate initial progress for UX feel
-      const fakeInterval = setInterval(() => {
-        setProgress((p) => (p < 60 ? p + 8 : p))
-      }, 200)
-
-      const result = await uploadDocument(selectedFile, (p) => setProgress(p))
-      clearInterval(fakeInterval)
-      setProgress(100)
-      setUploadResult(result)
-      setUploadState('success')
-      toast({ title: 'Upload successful', description: `${result.blocks_parsed} blocks parsed.` })
-      router.push(`/validate?doc=${result.document_id}`)
-      router.refresh()
-    } catch (err) {
-      setUploadState('error')
-      const msg =
-        'Failed to upload document. Make sure the backend is running and NEXT_PUBLIC_API_URL is configured correctly.'
-      setErrorMsg(msg)
-      toast({
-        title: 'Upload failed',
-        description: msg,
-        variant: 'destructive',
-      })
-    }
-  }
-
-  const handleProceed = () => {
-    if (uploadResult) {
-      router.push(`/validate?doc=${uploadResult.document_id}`)
-    }
-  }
-
-  const reset = () => {
-    setSelectedFile(null)
-    setUploadState('idle')
-    setProgress(0)
-    setUploadResult(null)
-    setErrorMsg('')
-    if (inputRef.current) inputRef.current.value = ''
-  }
-
-  const fileIcon = selectedFile?.type === 'application/pdf' ? FileText : File
+export default async function HomePage() {
+  const { userId } = await auth()
 
   return (
-    <AppShell
-      title="Upload Document"
-      subtitle="Import a PDF or DOCX file to begin the translation workflow"
-    >
-      <div className="mx-auto max-w-2xl space-y-6">
-        {/* Stats row */}
-        <div className="grid grid-cols-3 gap-4">
-          {[
-            { label: 'Supported formats', value: 'PDF, DOCX' },
-            { label: 'Max file size', value: '50 MB' },
-            { label: 'Processing speed', value: '~3s / page' },
-          ].map((s) => (
-            <Card key={s.label} className="p-4 text-center">
-              <p className="text-xs text-muted-foreground">{s.label}</p>
-              <p className="mt-1 text-sm font-semibold text-foreground">{s.value}</p>
+    <main className="relative overflow-hidden">
+      <div className="absolute inset-x-0 top-0 -z-10 h-[36rem] bg-[radial-gradient(circle_at_top,rgba(21,196,255,0.18),transparent_45%),radial-gradient(circle_at_20%_20%,rgba(33,238,196,0.14),transparent_35%),linear-gradient(180deg,rgba(9,19,38,0.04),transparent_70%)]" />
+
+      <section className="mx-auto max-w-7xl px-4 pb-16 pt-6 sm:px-6 lg:px-8">
+        <header className="flex items-center justify-between rounded-full border border-white/30 bg-white/55 px-4 py-3 shadow-[0_18px_50px_-40px_rgba(11,24,44,0.55)] backdrop-blur md:px-6">
+          <div className="flex items-center gap-3">
+            <div className="flex h-11 w-11 items-center justify-center rounded-2xl bg-[linear-gradient(135deg,#0f172a,#155dfc,#16c5ff)] text-white shadow-lg shadow-cyan-500/20">
+              <Languages className="h-5 w-5" />
+            </div>
+            <div>
+              <p className="text-sm font-semibold text-foreground">Translation Studio</p>
+              <p className="text-xs text-muted-foreground">AI workflow for premium multilingual delivery</p>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2">
+            {!userId ? (
+              <>
+                <Button asChild variant="ghost" className="rounded-full">
+                  <Link href="/sign-in">Sign in</Link>
+                </Button>
+                <Button asChild className="rounded-full">
+                  <Link href="/sign-up">Start with Google</Link>
+                </Button>
+              </>
+            ) : (
+              <>
+                <Button asChild variant="ghost" className="rounded-full">
+                  <Link href="/documents">Workspace</Link>
+                </Button>
+                <Button asChild className="rounded-full">
+                  <Link href="/upload">Upload</Link>
+                </Button>
+              </>
+            )}
+          </div>
+        </header>
+
+        <div className="grid items-center gap-12 pb-10 pt-14 lg:grid-cols-[1.05fr_0.95fr] lg:pt-20">
+          <div className="space-y-8">
+            <div className="inline-flex items-center gap-2 rounded-full border border-cyan-200/70 bg-white/70 px-4 py-2 text-xs font-semibold uppercase tracking-[0.24em] text-sky-800 shadow-sm backdrop-blur">
+              <Sparkles className="h-3.5 w-3.5" />
+              Market-ready translation experience
+            </div>
+
+            <div className="space-y-5">
+              <h1 className="max-w-3xl text-5xl font-semibold leading-[1.03] tracking-tight text-foreground md:text-6xl lg:text-7xl">
+                The translation workspace that finally feels as polished as the files you deliver.
+              </h1>
+              <p className="max-w-2xl text-base leading-8 text-muted-foreground md:text-lg">
+                Translation Studio helps teams move from raw source documents to export-ready multilingual assets
+                through a calmer, more beautiful workflow for validation, translation, review, and collaboration.
+              </p>
+            </div>
+
+            <div className="flex flex-col gap-3 sm:flex-row">
+              {!userId ? (
+                <>
+                  <Button asChild size="lg" className="h-12 rounded-full px-6 text-sm">
+                    <Link href="/sign-up">
+                      Start with Google
+                      <ArrowRight className="ml-2 h-4 w-4" />
+                    </Link>
+                  </Button>
+                  <Button asChild variant="outline" size="lg" className="h-12 rounded-full px-6 text-sm">
+                    <Link href="/sign-in">Sign in to continue</Link>
+                  </Button>
+                </>
+              ) : (
+                <>
+                  <Button asChild size="lg" className="h-12 rounded-full px-6 text-sm">
+                    <Link href="/upload">
+                      Upload a document
+                      <ArrowRight className="ml-2 h-4 w-4" />
+                    </Link>
+                  </Button>
+                  <Button asChild variant="outline" size="lg" className="h-12 rounded-full px-6 text-sm">
+                    <Link href="/documents">Browse documents</Link>
+                  </Button>
+                </>
+              )}
+            </div>
+
+            <div className="grid gap-3 sm:grid-cols-3">
+              {[
+                { value: '5-step', label: 'guided workflow' },
+                { value: 'TM-aware', label: 'review surface' },
+                { value: 'Shareable', label: 'document access' },
+              ].map((item) => (
+                <div key={item.label} className="rounded-[1.6rem] border border-white/35 bg-white/60 p-4 shadow-[0_24px_60px_-42px_rgba(11,24,44,0.55)] backdrop-blur">
+                  <p className="text-2xl font-semibold tracking-tight text-foreground">{item.value}</p>
+                  <p className="mt-1 text-sm text-muted-foreground">{item.label}</p>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <div className="relative">
+            <div className="absolute -left-8 top-10 hidden h-32 w-32 rounded-full bg-cyan-300/35 blur-3xl lg:block" />
+            <div className="absolute -right-8 bottom-8 hidden h-36 w-36 rounded-full bg-teal-300/25 blur-3xl lg:block" />
+
+            <div className="relative overflow-hidden rounded-[2rem] border border-white/35 bg-[linear-gradient(180deg,rgba(255,255,255,0.78),rgba(248,251,255,0.88))] p-4 shadow-[0_35px_120px_-50px_rgba(16,24,40,0.55)] backdrop-blur xl:p-6">
+              <div className="rounded-[1.5rem] border border-slate-200/70 bg-slate-950 px-5 py-4 text-white">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <p className="text-xs uppercase tracking-[0.22em] text-slate-300">Live workspace preview</p>
+                    <p className="mt-2 text-lg font-semibold">Review translations without losing context</p>
+                  </div>
+                  <div className="rounded-full border border-white/10 bg-white/10 px-3 py-1 text-xs text-slate-200">
+                    Synced with backend
+                  </div>
+                </div>
+
+                <div className="mt-6 grid gap-4 lg:grid-cols-[0.9fr_1.1fr]">
+                  <div className="space-y-3 rounded-[1.4rem] border border-white/10 bg-white/5 p-4">
+                    <p className="text-xs uppercase tracking-[0.18em] text-slate-400">Pipeline</p>
+                    {[
+                      'Source validation complete',
+                      'Translation draft generated',
+                      'Glossary warnings highlighted',
+                      'Export readiness tracked',
+                    ].map((item) => (
+                      <div key={item} className="flex items-center gap-3 rounded-2xl border border-white/6 bg-white/5 px-3 py-3">
+                        <CheckCircle2 className="h-4 w-4 text-emerald-300" />
+                        <span className="text-sm text-slate-100">{item}</span>
+                      </div>
+                    ))}
+                  </div>
+
+                  <div className="space-y-3 rounded-[1.4rem] border border-cyan-400/20 bg-[linear-gradient(180deg,rgba(15,23,42,0.92),rgba(17,24,39,0.84))] p-4">
+                    <div className="flex items-center justify-between">
+                      <div>
+                        <p className="text-xs uppercase tracking-[0.18em] text-cyan-200/70">Translation editor</p>
+                        <p className="mt-1 text-sm text-slate-300">Approve final copy segment by segment.</p>
+                      </div>
+                      <div className="rounded-full border border-cyan-300/25 bg-cyan-400/10 px-3 py-1 text-xs text-cyan-100">
+                        87% complete
+                      </div>
+                    </div>
+
+                    <div className="rounded-[1.2rem] border border-white/8 bg-white/5 p-4">
+                      <p className="text-xs uppercase tracking-[0.18em] text-slate-400">Source</p>
+                      <p className="mt-2 text-sm leading-7 text-slate-100">
+                        The supplier shall provide updated implementation timelines for all operational markets.
+                      </p>
+                    </div>
+
+                    <div className="rounded-[1.2rem] border border-cyan-400/20 bg-cyan-400/8 p-4">
+                      <div className="flex items-center justify-between">
+                        <p className="text-xs uppercase tracking-[0.18em] text-cyan-100/75">Draft translation</p>
+                        <span className="rounded-full border border-amber-300/30 bg-amber-400/10 px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.16em] text-amber-100">
+                          TM fuzzy
+                        </span>
+                      </div>
+                      <p className="mt-2 text-sm leading-7 text-slate-50">
+                        Le fournisseur doit fournir des calendriers de mise en oeuvre actualises pour tous les
+                        marches operationnels.
+                      </p>
+                    </div>
+
+                    <div className="rounded-[1.2rem] border border-emerald-300/18 bg-emerald-400/8 p-4">
+                      <p className="text-xs uppercase tracking-[0.18em] text-emerald-100/75">Final output</p>
+                      <p className="mt-2 text-sm leading-7 text-slate-50">
+                        Le fournisseur doit fournir des calendriers de mise en oeuvre mis a jour pour l&apos;ensemble des
+                        marches operationnels.
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <section className="grid gap-4 py-6 md:grid-cols-3">
+          {featureCards.map((feature) => (
+            <Card key={feature.title} className="rounded-[1.75rem] border-white/30 bg-white/60 p-6 shadow-[0_24px_60px_-45px_rgba(11,24,44,0.5)] backdrop-blur">
+              <div className="flex h-11 w-11 items-center justify-center rounded-2xl bg-[linear-gradient(135deg,rgba(6,182,212,0.18),rgba(20,184,166,0.24))] text-cyan-700">
+                <feature.icon className="h-5 w-5" />
+              </div>
+              <h2 className="mt-5 text-xl font-semibold tracking-tight text-foreground">{feature.title}</h2>
+              <p className="mt-2 text-sm leading-7 text-muted-foreground">{feature.description}</p>
             </Card>
           ))}
-        </div>
+        </section>
 
-        {/* Drop zone */}
-        <Card
-          className={cn(
-            'relative flex flex-col items-center justify-center rounded-2xl border-2 border-dashed p-12 text-center transition-all duration-200 cursor-pointer',
-            uploadState === 'dragging'
-              ? 'border-primary bg-accent scale-[1.01]'
-              : uploadState === 'success'
-              ? 'border-green-400 bg-[var(--status-exact-bg)]'
-              : uploadState === 'error'
-              ? 'border-destructive bg-[var(--status-new-bg)]'
-              : 'border-border bg-card hover:border-primary/50 hover:bg-accent/30'
-          )}
-          onDrop={onDrop}
-          onDragOver={onDragOver}
-          onDragLeave={onDragLeave}
-          onClick={() => !selectedFile && inputRef.current?.click()}
-        >
-          <input
-            ref={inputRef}
-            type="file"
-            accept=".pdf,.docx"
-            className="hidden"
-            onChange={onInputChange}
-          />
+        <section className="grid gap-6 py-10 lg:grid-cols-[0.9fr_1.1fr]">
+          <Card className="rounded-[2rem] border-white/30 bg-slate-950 p-7 text-white shadow-[0_35px_120px_-50px_rgba(2,8,23,0.8)]">
+            <p className="text-xs uppercase tracking-[0.22em] text-cyan-200/70">Why teams switch</p>
+            <h2 className="mt-4 text-3xl font-semibold tracking-tight">Onboarding that feels modern from the first click.</h2>
+            <p className="mt-4 text-sm leading-7 text-slate-300">
+              The product experience should reassure users immediately: beautiful entry point, clear next actions,
+              visible progress, and no confusion about what to do after a file is uploaded.
+            </p>
 
-          {uploadState === 'success' ? (
-            <CheckCircle2 className="h-12 w-12 text-[var(--status-exact)] mb-4" />
-          ) : uploadState === 'error' ? (
-            <AlertCircle className="h-12 w-12 text-destructive mb-4" />
-          ) : (
-            <div
-              className={cn(
-                'mb-4 flex h-16 w-16 items-center justify-center rounded-2xl transition-colors',
-                uploadState === 'dragging' ? 'bg-primary' : 'bg-muted'
-              )}
-            >
-              <Upload
-                className={cn(
-                  'h-7 w-7 transition-colors',
-                  uploadState === 'dragging' ? 'text-primary-foreground' : 'text-muted-foreground'
-                )}
-              />
+            <div className="mt-8 space-y-4">
+              {[
+                'Public landing page and premium auth entry',
+                'Protected product routes with redirect-safe sharing',
+                'Responsive workspace for QA, translation, glossary, and export',
+              ].map((item) => (
+                <div key={item} className="flex items-center gap-3 rounded-2xl border border-white/10 bg-white/5 px-4 py-3">
+                  <CheckCircle2 className="h-4 w-4 text-emerald-300" />
+                  <span className="text-sm text-slate-100">{item}</span>
+                </div>
+              ))}
             </div>
-          )}
+          </Card>
 
-          {uploadState === 'error' && errorMsg && (
-            <p className="mt-2 text-sm text-destructive max-w-xs">{errorMsg}</p>
-          )}
-
-          {!selectedFile ? (
-            <>
-              <p className="text-base font-semibold text-foreground">
-                {uploadState === 'dragging' ? 'Drop to upload' : 'Drag & drop your file here'}
-              </p>
-              <p className="mt-1.5 text-sm text-muted-foreground">
-                or{' '}
-                <span className="text-primary underline-offset-2 hover:underline cursor-pointer">
-                  browse files
-                </span>
-              </p>
-              <div className="mt-4 flex gap-2">
-                {['PDF', 'DOCX'].map((f) => (
-                  <Badge key={f} variant="secondary" className="font-mono text-xs">
-                    .{f.toLowerCase()}
-                  </Badge>
+          <div className="grid gap-4">
+            <Card className="rounded-[2rem] border-white/30 bg-white/60 p-6 backdrop-blur">
+              <p className="text-xs uppercase tracking-[0.22em] text-muted-foreground">Workflow</p>
+              <div className="mt-5 grid gap-3 md:grid-cols-2">
+                {steps.map((step, index) => (
+                  <div key={step} className="rounded-[1.5rem] border border-border/60 bg-background/75 p-4">
+                    <p className="text-xs font-semibold uppercase tracking-[0.18em] text-primary">Step {index + 1}</p>
+                    <p className="mt-3 text-sm leading-7 text-muted-foreground">{step}</p>
+                  </div>
                 ))}
               </div>
-            </>
-          ) : (
-            <>
-              <div className="flex items-center gap-3 mb-3">
-                <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-primary/10">
-                  {(() => {
-                    const Icon = fileIcon
-                    return <Icon className="h-5 w-5 text-primary" />
-                  })()}
-                </div>
-                <div className="text-left">
-                  <p className="text-sm font-semibold text-foreground">{selectedFile.name}</p>
-                  <p className="text-xs text-muted-foreground">{formatBytes(selectedFile.size)}</p>
-                </div>
-                {uploadState !== 'uploading' && (
-                  <button
-                    onClick={(e) => { e.stopPropagation(); reset() }}
-                    className="ml-2 rounded-full p-1 text-muted-foreground hover:bg-muted hover:text-foreground"
-                  >
-                    <X className="h-3.5 w-3.5" />
-                  </button>
-                )}
-              </div>
+            </Card>
 
-              {uploadState === 'uploading' && (
-                <div className="w-full max-w-xs space-y-1.5">
-                  <Progress value={progress} className="h-1.5" />
-                  <p className="text-xs text-muted-foreground">{progress}% uploaded</p>
-                </div>
-              )}
-
-              {uploadState === 'success' && uploadResult && (
-                <div className="text-center">
-                  <p className="text-sm font-medium text-[var(--status-exact)]">
-                    Upload complete
-                  </p>
-                  <p className="text-xs text-muted-foreground mt-0.5">
-                    {uploadResult.blocks_parsed} blocks parsed | ID: {uploadResult.document_id.slice(0, 12)}...
-                  </p>
-                </div>
-              )}
-            </>
-          )}
-        </Card>
-
-        {/* Actions */}
-        <div className="flex justify-end gap-3">
-          {selectedFile && uploadState !== 'uploading' && uploadState !== 'success' && (
-            <Button onClick={handleUpload} className="rounded-xl px-6">
-              <Upload className="mr-2 h-4 w-4" />
-              Upload & Parse
-            </Button>
-          )}
-
-          {uploadState === 'success' && (
-            <>
-              <Button variant="outline" onClick={reset} className="rounded-xl">
-                Upload Another
-              </Button>
-              <Button onClick={handleProceed} className="rounded-xl px-6">
-                Validate Document
-                <ArrowRight className="ml-2 h-4 w-4" />
-              </Button>
-            </>
-          )}
-
-          {!selectedFile && (
-            <Button
-              variant="outline"
-              className="rounded-xl"
-              onClick={() => inputRef.current?.click()}
-            >
-              <File className="mr-2 h-4 w-4" />
-              Browse Files
-            </Button>
-          )}
-        </div>
-
-        {/* Instructions */}
-        <Card className="p-5 rounded-2xl bg-accent/40 border-accent">
-          <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-3">
-            How it works
-          </p>
-          <div className="space-y-2.5">
-            {[
-              'Upload your PDF or DOCX source document',
-              'Validate spelling, grammar, and consistency',
-              'Translate into your target language',
-              'Review, edit, and approve segments with TM support',
-            ].map((step, i) => (
-              <div key={i} className="flex items-start gap-3">
-                <div className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-primary/15 text-[10px] font-bold text-primary">
-                  {i + 1}
-                </div>
-                <p className="text-sm text-muted-foreground leading-relaxed">{step}</p>
-              </div>
-            ))}
+            <div className="grid gap-4 md:grid-cols-2">
+              <Card className="rounded-[1.75rem] border-white/30 bg-white/60 p-6 backdrop-blur">
+                <FolderKanban className="h-5 w-5 text-primary" />
+                <h3 className="mt-4 text-xl font-semibold tracking-tight text-foreground">Shareable document access</h3>
+                <p className="mt-2 text-sm leading-7 text-muted-foreground">
+                  Generate a link for a document, invite teammates in, and route signed-out collaborators through auth
+                  before landing them in the right file.
+                </p>
+              </Card>
+              <Card className="rounded-[1.75rem] border-white/30 bg-white/60 p-6 backdrop-blur">
+                <FileText className="h-5 w-5 text-primary" />
+                <h3 className="mt-4 text-xl font-semibold tracking-tight text-foreground">Fidelity-first exports</h3>
+                <p className="mt-2 text-sm leading-7 text-muted-foreground">
+                  Keep the review experience grounded in the original document structure, then export with confidence.
+                </p>
+              </Card>
+            </div>
           </div>
-        </Card>
-      </div>
-    </AppShell>
+        </section>
+      </section>
+    </main>
   )
 }

@@ -1,58 +1,20 @@
 'use client'
 
-import { useState, useEffect } from 'react'
-import {
-  BookOpen,
-  Plus,
-  Trash2,
-  Search,
-  Edit2,
-  Check,
-  X,
-  Globe,
-  Tag,
-  StickyNote,
-} from 'lucide-react'
+import { useEffect, useMemo, useState } from 'react'
+import { BookOpen, Globe2, Plus, Search, Sparkles, Tag } from 'lucide-react'
 import { AppShell } from '@/components/app-shell'
 import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
-import { Badge } from '@/components/ui/badge'
-import { Spinner } from '@/components/ui/spinner'
-import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-  DialogDescription,
-  DialogFooter,
-} from '@/components/ui/dialog'
 import { Label } from '@/components/ui/label'
+import { Spinner } from '@/components/ui/spinner'
 import { Textarea } from '@/components/ui/textarea'
 import { useToast } from '@/hooks/use-toast'
-import { getGlossary, addGlossaryTerm, type GlossaryTerm } from '@/lib/api'
+import { addGlossaryTerm, getGlossary, type GlossaryResponse, type GlossaryTerm } from '@/lib/api'
 import { cn } from '@/lib/utils'
 
-const DOMAIN_COLORS: Record<string, string> = {
-  Finance: 'bg-blue-50 text-blue-700 border-blue-200',
-  Corporate: 'bg-slate-100 text-slate-700 border-slate-200',
-  ESG: 'bg-green-50 text-green-700 border-green-200',
-  Technology: 'bg-purple-50 text-purple-700 border-purple-200',
-  Operations: 'bg-orange-50 text-orange-700 border-orange-200',
-  Legal: 'bg-red-50 text-red-700 border-red-200',
-  Marketing: 'bg-pink-50 text-pink-700 border-pink-200',
-}
-
-function DomainBadge({ domain }: { domain: string }) {
-  const cls = DOMAIN_COLORS[domain] || 'bg-muted text-muted-foreground border-border'
-  return (
-    <span className={cn('inline-block rounded-full border px-2 py-0.5 text-[10px] font-medium', cls)}>
-      {domain}
-    </span>
-  )
-}
-
-const EMPTY_TERM: Omit<GlossaryTerm, 'id'> = {
+const EMPTY_TERM: GlossaryTerm = {
   source: '',
   target: '',
   language: 'fr',
@@ -60,364 +22,315 @@ const EMPTY_TERM: Omit<GlossaryTerm, 'id'> = {
   notes: '',
 }
 
+function DomainChip({ domain }: { domain: string }) {
+  const palette: Record<string, string> = {
+    legal: 'border-rose-200 bg-rose-50 text-rose-700 dark:border-rose-900/60 dark:bg-rose-950/30 dark:text-rose-200',
+    technology:
+      'border-sky-200 bg-sky-50 text-sky-700 dark:border-sky-900/60 dark:bg-sky-950/30 dark:text-sky-200',
+    finance:
+      'border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-900/60 dark:bg-emerald-950/30 dark:text-emerald-200',
+  }
+
+  return (
+    <span
+      className={cn(
+        'inline-flex rounded-full border px-2.5 py-1 text-[11px] font-medium',
+        palette[domain.toLowerCase()] ?? 'border-border bg-muted text-muted-foreground'
+      )}
+    >
+      {domain}
+    </span>
+  )
+}
+
 export default function GlossaryPage() {
   const { toast } = useToast()
-  const [terms, setTerms] = useState<GlossaryTerm[]>([])
+  const [glossary, setGlossary] = useState<GlossaryResponse>({ terms: [], style_rules: [] })
   const [loading, setLoading] = useState(true)
-  const [searchQuery, setSearchQuery] = useState('')
-  const [domainFilter, setDomainFilter] = useState('all')
-  const [dialogOpen, setDialogOpen] = useState(false)
-  const [formData, setFormData] = useState(EMPTY_TERM)
   const [saving, setSaving] = useState(false)
-  const [editingId, setEditingId] = useState<string | null>(null)
+  const [dialogOpen, setDialogOpen] = useState(false)
+  const [query, setQuery] = useState('')
+  const [formData, setFormData] = useState<GlossaryTerm>(EMPTY_TERM)
 
   const loadGlossary = async () => {
     setLoading(true)
+
     try {
       const data = await getGlossary()
-      if (Array.isArray(data)) {
-        setTerms(data)
-      } else {
-        setTerms([])
-      }
-    } catch (err) {
+      setGlossary(data)
+    } catch {
       toast({
         title: 'Failed to load glossary',
-        description:
-          'Could not fetch glossary terms from the backend. Ensure the API is running and the URL is configured correctly.',
+        description: 'Could not fetch glossary terms from the backend.',
         variant: 'destructive',
       })
-      setTerms([])
+      setGlossary({ terms: [], style_rules: [] })
     } finally {
       setLoading(false)
     }
   }
 
-  useEffect(() => { loadGlossary() }, [])
+  useEffect(() => {
+    void loadGlossary()
+  }, [])
 
-  const handleAdd = async () => {
+  const filteredTerms = useMemo(() => {
+    return glossary.terms.filter((term) => {
+      const haystack = [term.source, term.target, term.language, term.domain ?? '', term.notes ?? ''].join(' ').toLowerCase()
+      return haystack.includes(query.toLowerCase())
+    })
+  }, [glossary.terms, query])
+
+  const stats = useMemo(
+    () => ({
+      termCount: glossary.terms.length,
+      languageCount: new Set(glossary.terms.map((term) => term.language)).size,
+      domainCount: new Set(glossary.terms.map((term) => term.domain).filter(Boolean)).size,
+      rulesCount: glossary.style_rules.length,
+    }),
+    [glossary]
+  )
+
+  const handleSave = async () => {
     if (!formData.source.trim() || !formData.target.trim()) {
-      toast({ title: 'Required fields', description: 'Source and target terms are required.', variant: 'destructive' })
+      toast({
+        title: 'Missing required fields',
+        description: 'Source and target terms are required.',
+        variant: 'destructive',
+      })
       return
     }
+
     setSaving(true)
+
     try {
-      const added = await addGlossaryTerm(formData)
-      setTerms((prev) => [...prev, added])
-      toast({ title: 'Term added', description: `"${formData.source}" → "${formData.target}"` })
-    } catch (err) {
+      const updated = await addGlossaryTerm({
+        ...formData,
+        domain: formData.domain?.trim() || null,
+        notes: formData.notes?.trim() || null,
+      })
+
+      setGlossary(updated)
+      setDialogOpen(false)
+      setFormData(EMPTY_TERM)
       toast({
-        title: 'Failed to add term',
-        description: 'Could not save the term. Please check your connection and try again.',
+        title: 'Glossary updated',
+        description: `Saved ${formData.source} -> ${formData.target}.`,
+      })
+    } catch {
+      toast({
+        title: 'Save failed',
+        description: 'The glossary term could not be stored by the backend.',
         variant: 'destructive',
       })
     } finally {
       setSaving(false)
-      setDialogOpen(false)
-      setFormData(EMPTY_TERM)
     }
   }
 
-  const handleDelete = (id: string | undefined) => {
-    if (!id) return
-    setTerms((prev) => prev.filter((t) => t.id !== id))
-    toast({ title: 'Term removed' })
-  }
-
-  const handleEditSave = (id: string | undefined, updated: GlossaryTerm) => {
-    if (!id) return
-    setTerms((prev) => prev.map((t) => (t.id === id ? updated : t)))
-    setEditingId(null)
-    toast({ title: 'Term updated' })
-  }
-
-  // Defensive: ensure terms is always an array
-  const safeTerms: GlossaryTerm[] = Array.isArray(terms) ? terms : []
-  const domains = ['all', ...Array.from(new Set(safeTerms.map((t) => t.domain).filter(Boolean)))]
-
-  const filtered = safeTerms.filter((t) => {
-    const matchSearch =
-      !searchQuery ||
-      t.source.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      t.target.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      t.domain.toLowerCase().includes(searchQuery.toLowerCase())
-    const matchDomain = domainFilter === 'all' || t.domain === domainFilter
-    return matchSearch && matchDomain
-  })
-
   return (
     <AppShell
-      title="Glossary Manager"
-      subtitle={`${safeTerms.length} term pairs across ${domains.length - 1} domains`}
+      title="Glossary"
+      subtitle="Keep terminology and writing guidance consistent across every document review."
       actions={
-        <Button onClick={() => setDialogOpen(true)} className="rounded-xl">
+        <Button className="rounded-2xl" onClick={() => setDialogOpen(true)}>
           <Plus className="mr-2 h-4 w-4" />
           Add Term
         </Button>
       }
     >
-      <div className="space-y-4">
-        {/* Controls */}
-        <Card className="rounded-2xl p-4">
-          <div className="flex flex-wrap gap-3 items-center">
-            <div className="relative flex-1 min-w-48">
-              <Search className="absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
-              <Input
-                placeholder="Search terms…"
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                className="pl-9 rounded-xl h-9 text-sm"
-              />
+      <div className="space-y-6">
+        <section className="hero-sheen overflow-hidden rounded-[2rem] border border-border/70">
+          <div className="grid gap-4 px-6 py-7 lg:grid-cols-[1.2fr_0.8fr] lg:px-8">
+            <div>
+              <p className="text-xs font-semibold uppercase tracking-[0.22em] text-primary">Terminology control</p>
+              <h2 className="mt-3 text-3xl font-semibold tracking-tight text-foreground md:text-4xl">
+                Give translators and reviewers one clean source of truth.
+              </h2>
+              <p className="mt-3 max-w-2xl text-sm leading-7 text-muted-foreground md:text-base">
+                Use approved terms and style rules to reduce inconsistency, protect domain language, and keep the
+                translation workflow aligned from the first draft through final export.
+              </p>
             </div>
-            <div className="flex flex-wrap gap-1.5">
-              {domains.map((d) => (
-                <button
-                  key={d}
-                  onClick={() => setDomainFilter(d)}
-                  className={cn(
-                    'rounded-full px-3 py-1 text-xs font-medium capitalize transition-colors',
-                    domainFilter === d
-                      ? 'bg-primary text-primary-foreground'
-                      : 'bg-muted text-muted-foreground hover:bg-accent hover:text-foreground'
-                  )}
-                >
-                  {d}
-                </button>
+
+            <div className="grid gap-3 sm:grid-cols-2">
+              {[
+                { label: 'Terms', value: stats.termCount, icon: BookOpen },
+                { label: 'Languages', value: stats.languageCount, icon: Globe2 },
+                { label: 'Domains', value: stats.domainCount, icon: Tag },
+                { label: 'Style rules', value: stats.rulesCount, icon: Sparkles },
+              ].map((item) => (
+                <Card key={item.label} className="rounded-[1.5rem] border-border/60 bg-background/75 p-4">
+                  <item.icon className="h-4 w-4 text-primary" />
+                  <p className="mt-4 text-2xl font-semibold tracking-tight text-foreground">{loading ? '-' : item.value}</p>
+                  <p className="mt-1 text-xs uppercase tracking-[0.18em] text-muted-foreground">{item.label}</p>
+                </Card>
               ))}
             </div>
           </div>
-        </Card>
+        </section>
 
-        {/* Stats row */}
-        <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
-          {[
-            { label: 'Total terms', value: safeTerms.length, icon: BookOpen },
-            { label: 'Domains', value: domains.length - 1, icon: Tag },
-            { label: 'Languages', value: Array.from(new Set(safeTerms.map((t) => t.language))).length, icon: Globe },
-            { label: 'With notes', value: safeTerms.filter((t) => t.notes).length, icon: StickyNote },
-          ].map((s) => (
-            <Card key={s.label} className="flex items-center gap-3 rounded-2xl p-4">
-              <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-primary/10">
-                <s.icon className="h-4 w-4 text-primary" />
-              </div>
-              <div>
-                <p className="text-xl font-bold leading-none text-foreground">{loading ? '—' : s.value}</p>
-                <p className="text-xs text-muted-foreground mt-0.5">{s.label}</p>
+        <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_320px]">
+          <div className="space-y-4">
+            <Card className="glass-panel rounded-[1.75rem] p-4">
+              <div className="relative">
+                <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+                <Input
+                  value={query}
+                  onChange={(event) => setQuery(event.target.value)}
+                  placeholder="Search terms, targets, domains, or notes..."
+                  className="h-11 rounded-2xl border-border/70 pl-10"
+                />
               </div>
             </Card>
-          ))}
-        </div>
 
-        {/* Table */}
-        {loading ? (
-          <div className="flex flex-col items-center gap-4 py-24">
-            <Spinner className="h-8 w-8 text-primary" />
-            <p className="text-sm text-muted-foreground">Loading glossary…</p>
+            {loading ? (
+              <div className="glass-panel flex flex-col items-center gap-4 rounded-[2rem] py-24">
+                <Spinner className="h-8 w-8 text-primary" />
+                <p className="text-sm text-muted-foreground">Loading glossary...</p>
+              </div>
+            ) : filteredTerms.length === 0 ? (
+              <Card className="glass-panel flex flex-col items-center gap-3 rounded-[2rem] py-20 text-center">
+                <BookOpen className="h-10 w-10 text-muted-foreground/50" />
+                <p className="text-lg font-semibold text-foreground">No matching terms</p>
+                <p className="max-w-md text-sm leading-7 text-muted-foreground">
+                  Add approved language for your domain so reviewers and translators can stay aligned.
+                </p>
+              </Card>
+            ) : (
+              <div className="grid gap-4">
+                {filteredTerms.map((term, index) => (
+                  <Card key={`${term.source}-${term.language}-${index}`} className="glass-panel rounded-[1.75rem] p-5">
+                    <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+                      <div className="space-y-3">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <p className="text-lg font-semibold text-foreground">{term.source}</p>
+                          <span className="text-sm text-muted-foreground">{'->'}</span>
+                          <p className="text-lg font-semibold text-primary">{term.target}</p>
+                        </div>
+                        <div className="flex flex-wrap gap-2">
+                          <span className="rounded-full border border-border bg-background/80 px-2.5 py-1 text-[11px] font-mono uppercase text-muted-foreground">
+                            {term.language}
+                          </span>
+                          {term.domain ? <DomainChip domain={term.domain} /> : null}
+                        </div>
+                      </div>
+
+                      {term.notes ? (
+                        <div className="max-w-md rounded-[1.25rem] border border-border/60 bg-background/70 px-4 py-3 text-sm leading-7 text-muted-foreground">
+                          {term.notes}
+                        </div>
+                      ) : null}
+                    </div>
+                  </Card>
+                ))}
+              </div>
+            )}
           </div>
-        ) : filtered.length === 0 ? (
-          <div className="flex flex-col items-center gap-3 rounded-2xl border border-dashed border-border bg-card py-16">
-            <BookOpen className="h-10 w-10 text-muted-foreground/40" />
-            <p className="text-sm font-medium text-muted-foreground">No terms found</p>
-            <Button variant="outline" size="sm" onClick={() => setDialogOpen(true)} className="rounded-xl">
-              <Plus className="mr-1.5 h-3.5 w-3.5" />
-              Add First Term
-            </Button>
+
+          <div className="space-y-4">
+            <Card className="glass-panel rounded-[1.75rem] p-5">
+              <p className="text-xs font-semibold uppercase tracking-[0.2em] text-muted-foreground">Style rules</p>
+              <div className="mt-4 space-y-3">
+                {glossary.style_rules.length > 0 ? (
+                  glossary.style_rules.map((rule, index) => (
+                    <div key={`${rule}-${index}`} className="rounded-[1.25rem] border border-border/60 bg-background/75 px-4 py-3 text-sm leading-7 text-muted-foreground">
+                      {rule}
+                    </div>
+                  ))
+                ) : (
+                  <p className="text-sm leading-7 text-muted-foreground">
+                    No backend style rules are configured yet. Added rules will appear here when the API returns them.
+                  </p>
+                )}
+              </div>
+            </Card>
+
+            <Card className="glass-panel rounded-[1.75rem] p-5">
+              <p className="text-xs font-semibold uppercase tracking-[0.2em] text-muted-foreground">How updates work</p>
+              <div className="mt-4 space-y-3 text-sm leading-7 text-muted-foreground">
+                <p>The backend supports adding or updating terms through the same glossary save endpoint.</p>
+                <p>There is no supported delete endpoint, so this screen stays honest to the current backend contract.</p>
+              </div>
+            </Card>
           </div>
-        ) : (
-          <Card className="overflow-hidden rounded-2xl">
-            {/* Header */}
-            <div className="grid grid-cols-[1fr_1fr_80px_80px_1fr_80px] gap-0 border-b border-border bg-muted/40 px-4 py-2.5 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
-              <div>Source</div>
-              <div>Target</div>
-              <div>Language</div>
-              <div>Domain</div>
-              <div>Notes</div>
-              <div className="text-right">Actions</div>
-            </div>
-            <div className="divide-y divide-border">
-              {filtered.map((term) => (
-                <TermRow
-                  key={term.id}
-                  term={term}
-                  isEditing={editingId === term.id}
-                  onEdit={() => setEditingId(term.id ?? null)}
-                  onSave={(updated) => handleEditSave(term.id, updated)}
-                  onCancel={() => setEditingId(null)}
-                  onDelete={() => handleDelete(term.id)}
-                />
-              ))}
-            </div>
-          </Card>
-        )}
+        </div>
       </div>
 
-      {/* Add Term Dialog */}
       <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
-        <DialogContent className="rounded-2xl sm:max-w-lg">
+        <DialogContent className="rounded-[2rem] sm:max-w-xl">
           <DialogHeader>
-            <DialogTitle>Add Glossary Term</DialogTitle>
+            <DialogTitle>Add or update a glossary term</DialogTitle>
             <DialogDescription>
-              Define a source-target term pair to ensure consistency across translations.
+              Save approved terminology so machine drafts and reviewers stay aligned.
             </DialogDescription>
           </DialogHeader>
-          <div className="space-y-4 py-2">
-            <div className="grid grid-cols-2 gap-4">
-              <div className="space-y-1.5">
-                <Label htmlFor="source" className="text-xs">Source Term *</Label>
+
+          <div className="grid gap-4 py-2">
+            <div className="grid gap-4 sm:grid-cols-2">
+              <div className="space-y-2">
+                <Label htmlFor="source">Source term</Label>
                 <Input
                   id="source"
-                  placeholder="e.g. Revenue"
                   value={formData.source}
-                  onChange={(e) => setFormData({ ...formData, source: e.target.value })}
-                  className="rounded-xl"
+                  onChange={(event) => setFormData((prev) => ({ ...prev, source: event.target.value }))}
+                  className="rounded-2xl"
                 />
               </div>
-              <div className="space-y-1.5">
-                <Label htmlFor="target" className="text-xs">Target Term *</Label>
+              <div className="space-y-2">
+                <Label htmlFor="target">Target term</Label>
                 <Input
                   id="target"
-                  placeholder="e.g. Chiffre d'affaires"
                   value={formData.target}
-                  onChange={(e) => setFormData({ ...formData, target: e.target.value })}
-                  className="rounded-xl"
+                  onChange={(event) => setFormData((prev) => ({ ...prev, target: event.target.value }))}
+                  className="rounded-2xl"
                 />
               </div>
             </div>
-            <div className="grid grid-cols-2 gap-4">
-              <div className="space-y-1.5">
-                <Label htmlFor="language" className="text-xs">Target Language</Label>
+
+            <div className="grid gap-4 sm:grid-cols-2">
+              <div className="space-y-2">
+                <Label htmlFor="language">Language</Label>
                 <Input
                   id="language"
-                  placeholder="e.g. fr, es, de"
                   value={formData.language}
-                  onChange={(e) => setFormData({ ...formData, language: e.target.value })}
-                  className="rounded-xl"
+                  onChange={(event) => setFormData((prev) => ({ ...prev, language: event.target.value }))}
+                  className="rounded-2xl"
                 />
               </div>
-              <div className="space-y-1.5">
-                <Label htmlFor="domain" className="text-xs">Domain</Label>
+              <div className="space-y-2">
+                <Label htmlFor="domain">Domain</Label>
                 <Input
                   id="domain"
-                  placeholder="e.g. Finance, Legal"
-                  value={formData.domain}
-                  onChange={(e) => setFormData({ ...formData, domain: e.target.value })}
-                  className="rounded-xl"
+                  value={formData.domain ?? ''}
+                  onChange={(event) => setFormData((prev) => ({ ...prev, domain: event.target.value }))}
+                  className="rounded-2xl"
                 />
               </div>
             </div>
-            <div className="space-y-1.5">
-              <Label htmlFor="notes" className="text-xs">Notes</Label>
+
+            <div className="space-y-2">
+              <Label htmlFor="notes">Notes</Label>
               <Textarea
                 id="notes"
-                placeholder="Usage guidelines, context, or restrictions…"
-                value={formData.notes}
-                onChange={(e) => setFormData({ ...formData, notes: e.target.value })}
-                className="rounded-xl resize-none"
-                rows={2}
+                value={formData.notes ?? ''}
+                onChange={(event) => setFormData((prev) => ({ ...prev, notes: event.target.value }))}
+                className="min-h-28 rounded-2xl"
               />
             </div>
           </div>
+
           <DialogFooter>
-            <Button variant="outline" onClick={() => setDialogOpen(false)} className="rounded-xl">
+            <Button variant="outline" className="rounded-2xl" onClick={() => setDialogOpen(false)}>
               Cancel
             </Button>
-            <Button onClick={handleAdd} disabled={saving} className="rounded-xl">
-              {saving ? <Spinner className="mr-2 h-3.5 w-3.5" /> : <Plus className="mr-2 h-4 w-4" />}
-              Add Term
+            <Button className="rounded-2xl" onClick={handleSave} disabled={saving}>
+              {saving ? <Spinner className="mr-2 h-4 w-4" /> : <Plus className="mr-2 h-4 w-4" />}
+              Save term
             </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
     </AppShell>
-  )
-}
-
-function TermRow({
-  term,
-  isEditing,
-  onEdit,
-  onSave,
-  onCancel,
-  onDelete,
-}: {
-  term: GlossaryTerm
-  isEditing: boolean
-  onEdit: () => void
-  onSave: (updated: GlossaryTerm) => void
-  onCancel: () => void
-  onDelete: () => void
-}) {
-  const [local, setLocal] = useState(term)
-
-  useEffect(() => { setLocal(term) }, [term])
-
-  if (isEditing) {
-    return (
-      <div className="grid grid-cols-[1fr_1fr_80px_80px_1fr_80px] gap-0 items-center px-4 py-3 bg-accent/30">
-        <Input
-          value={local.source}
-          onChange={(e) => setLocal({ ...local, source: e.target.value })}
-          className="h-8 rounded-lg text-sm mr-2"
-        />
-        <Input
-          value={local.target}
-          onChange={(e) => setLocal({ ...local, target: e.target.value })}
-          className="h-8 rounded-lg text-sm mr-2"
-        />
-        <Input
-          value={local.language}
-          onChange={(e) => setLocal({ ...local, language: e.target.value })}
-          className="h-8 rounded-lg text-xs mr-2"
-        />
-        <Input
-          value={local.domain}
-          onChange={(e) => setLocal({ ...local, domain: e.target.value })}
-          className="h-8 rounded-lg text-xs mr-2"
-        />
-        <Input
-          value={local.notes}
-          onChange={(e) => setLocal({ ...local, notes: e.target.value })}
-          className="h-8 rounded-lg text-xs mr-2"
-        />
-        <div className="flex items-center justify-end gap-1">
-          <Button size="sm" className="h-7 w-7 p-0 rounded-lg" onClick={() => onSave(local)}>
-            <Check className="h-3 w-3" />
-          </Button>
-          <Button size="sm" variant="outline" className="h-7 w-7 p-0 rounded-lg" onClick={onCancel}>
-            <X className="h-3 w-3" />
-          </Button>
-        </div>
-      </div>
-    )
-  }
-
-  return (
-    <div className="group grid grid-cols-[1fr_1fr_80px_80px_1fr_80px] gap-0 items-center px-4 py-3.5 hover:bg-muted/30 transition-colors">
-      <p className="text-sm font-medium text-foreground pr-2">{term.source}</p>
-      <p className="text-sm text-foreground pr-2">{term.target}</p>
-      <span className="text-xs font-mono text-muted-foreground uppercase pr-2">{term.language}</span>
-      <div className="pr-2">
-        <DomainBadge domain={term.domain} />
-      </div>
-      <p className="text-xs text-muted-foreground line-clamp-1 pr-2">{term.notes || '—'}</p>
-      <div className="flex items-center justify-end gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-        <Button
-          size="sm"
-          variant="ghost"
-          className="h-7 w-7 p-0 rounded-lg"
-          onClick={onEdit}
-        >
-          <Edit2 className="h-3 w-3" />
-        </Button>
-        <Button
-          size="sm"
-          variant="ghost"
-          className="h-7 w-7 p-0 rounded-lg text-destructive hover:bg-destructive/10"
-          onClick={onDelete}
-        >
-          <Trash2 className="h-3 w-3" />
-        </Button>
-      </div>
-    </div>
   )
 }
