@@ -2,7 +2,8 @@
 
 import { useEffect, useMemo, useState } from 'react'
 import { useRouter } from 'next/navigation'
-import { ArrowRight, File, FileText, FolderOpen, Link2, Loader2, RefreshCw, Sparkles, Trash2 } from 'lucide-react'
+import { AnimatePresence, motion } from 'framer-motion'
+import { ArrowRight, File, FileText, FolderOpen, Link2, Loader2, RefreshCw, Sparkles, Trash2, Users } from 'lucide-react'
 import {
   AlertDialog,
   AlertDialogAction,
@@ -18,10 +19,24 @@ import { AppShell } from '@/components/app-shell'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
+import { HoverCard, Reveal } from '@/components/motion/primitives'
 import { Spinner } from '@/components/ui/spinner'
 import { useToast } from '@/hooks/use-toast'
-import { createShareLink, deleteDocument, getDocuments, type DocumentSummary } from '@/lib/api'
+import { createShareLink, deleteDocument, getDocuments, getShareOverview, type DocumentSummary, type ShareOverviewResponse } from '@/lib/api'
 import { cn } from '@/lib/utils'
+
+function getLocalCustomSegmentCount(documentId: string) {
+  if (typeof window === 'undefined') return 0
+
+  try {
+    const raw = window.localStorage.getItem(`translation-studio-workspace:${documentId}`)
+    if (!raw) return 0
+    const parsed = JSON.parse(raw) as { customSegments?: unknown[] }
+    return Array.isArray(parsed.customSegments) ? parsed.customSegments.length : 0
+  } catch {
+    return 0
+  }
+}
 
 function formatRelativeTime(value: string) {
   const target = new Date(value).getTime()
@@ -96,12 +111,16 @@ function StackedProgress({ document }: { document: DocumentSummary }) {
 function DocumentCard({
   document,
   deleting,
+  shareMeta,
+  received,
   onOpen,
   onDelete,
   onShare,
 }: {
   document: DocumentSummary
   deleting: boolean
+  shareMeta?: ShareOverviewResponse['ownedByDocument'][string]
+  received: boolean
   onOpen: () => void
   onDelete: () => Promise<void>
   onShare: () => Promise<void>
@@ -109,7 +128,12 @@ function DocumentCard({
   const FileIcon = document.file_type === 'pdf' ? FileText : File
 
   return (
-    <Card className="glass-panel rounded-3xl p-5">
+    <HoverCard
+      initial={{ opacity: 0, y: 20 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ duration: 0.45, ease: [0.22, 1, 0.36, 1] }}
+      className="glass-panel rounded-3xl p-5"
+    >
       <div className="flex flex-col gap-5">
         <div className="flex items-start justify-between gap-4">
           <div className="flex min-w-0 items-start gap-3">
@@ -120,6 +144,11 @@ function DocumentCard({
               <p className="truncate text-base font-semibold text-foreground">{document.filename}</p>
               <div className="mt-1 flex flex-wrap items-center gap-2">
                 <FileTypeBadge fileType={document.file_type} />
+                {received ? (
+                  <Badge variant="outline" className="rounded-full border-cyan-200 bg-cyan-50 text-cyan-700 dark:border-cyan-900/60 dark:bg-cyan-950/40 dark:text-cyan-200">
+                    Shared doc
+                  </Badge>
+                ) : null}
                 <span className="text-xs text-muted-foreground">{document.blocks_count} blocks</span>
                 {document.created_at ? (
                   <span className="text-xs text-muted-foreground">{formatRelativeTime(document.created_at)}</span>
@@ -135,13 +164,33 @@ function DocumentCard({
 
         <StackedProgress document={document} />
 
-        <div className="grid grid-cols-3 gap-2 text-xs">
+        <div className="grid grid-cols-1 gap-2 text-xs sm:grid-cols-3">
           <div className="rounded-2xl bg-muted/70 px-3 py-2 text-muted-foreground">Pending {document.segments.pending}</div>
           <div className="rounded-2xl bg-muted/70 px-3 py-2 text-muted-foreground">Reviewed {document.segments.reviewed}</div>
           <div className="rounded-2xl bg-muted/70 px-3 py-2 text-muted-foreground">Approved {document.segments.approved}</div>
         </div>
 
-        <div className="flex justify-end gap-2">
+        {shareMeta ? (
+          <div className="motion-card-subtle rounded-2xl border border-border/60 bg-background/70 p-4">
+            <div className="flex items-center gap-2">
+              <Users className="h-4 w-4 text-primary" />
+              <p className="text-xs font-semibold uppercase tracking-[0.18em] text-muted-foreground">Shared with</p>
+            </div>
+            <div className="mt-3 flex flex-wrap gap-2">
+              {shareMeta.recipients.length > 0 ? (
+                shareMeta.recipients.map((recipient) => (
+                  <Badge key={`${document.id}-${recipient.clerkUserId}`} variant="outline" className="rounded-full px-3 py-1 text-[11px]">
+                    {recipient.name || recipient.email}
+                  </Badge>
+                ))
+              ) : (
+                <span className="text-xs text-muted-foreground">No one has opened this share link yet.</span>
+              )}
+            </div>
+          </div>
+        ) : null}
+
+        <div className="flex flex-wrap justify-end gap-2">
           <Button variant="outline" className="rounded-xl" onClick={() => void onShare()}>
             <Link2 className="mr-1.5 h-4 w-4" />
             Share
@@ -181,7 +230,7 @@ function DocumentCard({
           </AlertDialog>
         </div>
       </div>
-    </Card>
+    </HoverCard>
   )
 }
 
@@ -192,14 +241,26 @@ export default function DocumentsPage() {
   const [loading, setLoading] = useState(true)
   const [refreshing, setRefreshing] = useState(false)
   const [deletingId, setDeletingId] = useState<string | null>(null)
+  const [shareOverview, setShareOverview] = useState<ShareOverviewResponse>({
+    ownedByDocument: {},
+    receivedDocumentIds: [],
+  })
+  const [customSegmentCounts, setCustomSegmentCounts] = useState<Record<string, number>>({})
 
   const loadDocuments = async (silent = false) => {
     if (silent) setRefreshing(true)
     else setLoading(true)
 
     try {
-      const data = await getDocuments()
+      const [data, shareData] = await Promise.all([
+        getDocuments(),
+        getShareOverview().catch(() => ({
+          ownedByDocument: {},
+          receivedDocumentIds: [],
+        })),
+      ])
       setDocuments(data)
+      setShareOverview(shareData)
     } catch {
       toast({
         title: 'Failed to load documents',
@@ -207,6 +268,7 @@ export default function DocumentsPage() {
         variant: 'destructive',
       })
       setDocuments([])
+      setShareOverview({ ownedByDocument: {}, receivedDocumentIds: [] })
     } finally {
       setLoading(false)
       setRefreshing(false)
@@ -221,9 +283,41 @@ export default function DocumentsPage() {
     return () => window.clearInterval(interval)
   }, [])
 
+  useEffect(() => {
+    const counts = documents.reduce<Record<string, number>>((acc, document) => {
+      acc[document.id] = getLocalCustomSegmentCount(document.id)
+      return acc
+    }, {})
+
+    setCustomSegmentCounts(counts)
+  }, [documents])
+
+  const displayDocuments = useMemo(
+    () =>
+      documents.map((document) => {
+        const customCount = customSegmentCounts[document.id] ?? 0
+        if (!customCount) return document
+
+        const total = document.segments.total + customCount
+        const pending = document.segments.pending + customCount
+        const translated = document.segments.reviewed + document.segments.approved
+
+        return {
+          ...document,
+          segments: {
+            ...document.segments,
+            total,
+            pending,
+          },
+          translation_progress: total ? (translated / total) * 100 : document.translation_progress,
+        }
+      }),
+    [customSegmentCounts, documents]
+  )
+
   const totals = useMemo(
     () =>
-      documents.reduce(
+      displayDocuments.reduce(
         (acc, doc) => {
           acc.total += 1
           acc.pending += doc.segments.pending
@@ -233,7 +327,7 @@ export default function DocumentsPage() {
         },
         { total: 0, pending: 0, reviewed: 0, approved: 0 }
       ),
-    [documents]
+    [displayDocuments]
   )
 
   const handleDelete = async (id: string) => {
@@ -275,20 +369,9 @@ export default function DocumentsPage() {
     <AppShell
       title="Documents"
       subtitle="Browse uploaded files, track progress, and reopen any document."
-      actions={
-        <div className="flex gap-2">
-          <Button variant="outline" className="rounded-xl" onClick={() => void loadDocuments(true)} disabled={refreshing}>
-            <RefreshCw className={cn('mr-1.5 h-4 w-4', refreshing && 'animate-spin')} />
-            Refresh
-          </Button>
-          <Button className="rounded-xl" onClick={() => router.push('/upload')}>
-            Upload Document
-          </Button>
-        </div>
-      }
     >
       <div className="space-y-5">
-        <section className="hero-sheen overflow-hidden rounded-[2rem] border border-border/70">
+        <Reveal className="hero-sheen overflow-hidden rounded-[2rem] border border-border/70">
           <div className="grid gap-6 px-6 py-7 lg:grid-cols-[1.2fr_0.8fr] lg:px-8">
             <div>
               <p className="text-xs font-semibold uppercase tracking-[0.22em] text-primary">Document operations</p>
@@ -301,7 +384,7 @@ export default function DocumentsPage() {
               </p>
             </div>
 
-            <Card className="rounded-[1.75rem] border-border/60 bg-background/75 p-5">
+            <Card className="motion-card motion-sheen rounded-[1.75rem] border-border/60 bg-background/75 p-5">
               <div className="flex items-center gap-3">
                 <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-primary/10 text-primary">
                   <Sparkles className="h-5 w-5" />
@@ -311,9 +394,18 @@ export default function DocumentsPage() {
                   <p className="text-sm text-muted-foreground">Share links route collaborators into the right file after login.</p>
                 </div>
               </div>
+              <div className="mt-4 flex flex-wrap gap-2">
+                <Button variant="outline" className="rounded-2xl" onClick={() => void loadDocuments(true)} disabled={refreshing}>
+                  <RefreshCw className={cn('mr-2 h-4 w-4', refreshing && 'animate-spin')} />
+                  Refresh
+                </Button>
+                <Button className="rounded-2xl" onClick={() => router.push('/upload')}>
+                  Upload Document
+                </Button>
+              </div>
             </Card>
           </div>
-        </section>
+        </Reveal>
 
         <div className="grid gap-4 md:grid-cols-4">
           {[
@@ -321,11 +413,19 @@ export default function DocumentsPage() {
             { label: 'Pending', value: totals.pending },
             { label: 'Reviewed', value: totals.reviewed },
             { label: 'Approved', value: totals.approved },
-          ].map((item) => (
-            <Card key={item.label} className="rounded-2xl border-border/70 p-4">
+          ].map((item, index) => (
+            <motion.div
+              key={item.label}
+              initial={{ opacity: 0, y: 18 }}
+              whileInView={{ opacity: 1, y: 0 }}
+              viewport={{ once: true, amount: 0.25 }}
+              transition={{ duration: 0.45, delay: index * 0.07, ease: [0.22, 1, 0.36, 1] }}
+            >
+            <Card className={cn('rounded-2xl border-border/70 p-4')}>
               <p className="text-xs uppercase tracking-[0.18em] text-muted-foreground">{item.label}</p>
               <p className="mt-2 text-2xl font-semibold text-foreground">{item.value}</p>
             </Card>
+            </motion.div>
           ))}
         </div>
 
@@ -334,7 +434,7 @@ export default function DocumentsPage() {
             <Spinner className="h-8 w-8 text-primary" />
             <p className="text-sm text-muted-foreground">Loading documents...</p>
           </div>
-        ) : documents.length === 0 ? (
+        ) : displayDocuments.length === 0 ? (
           <Card className="glass-panel flex flex-col items-center gap-4 rounded-3xl py-20 text-center">
             <div className="flex h-16 w-16 items-center justify-center rounded-3xl bg-muted">
               <FolderOpen className="h-8 w-8 text-muted-foreground" />
@@ -348,18 +448,22 @@ export default function DocumentsPage() {
             </Button>
           </Card>
         ) : (
-          <div className="grid gap-4 xl:grid-cols-2">
-            {documents.map((document) => (
+          <motion.div layout className="grid gap-4 xl:grid-cols-2">
+            <AnimatePresence mode="popLayout">
+            {displayDocuments.map((document) => (
               <DocumentCard
                 key={document.id}
                 document={document}
                 deleting={deletingId === document.id}
+                shareMeta={shareOverview.ownedByDocument[document.id]}
+                received={shareOverview.receivedDocumentIds.includes(document.id)}
                 onOpen={() => router.push(`/translate?doc=${document.id}`)}
                 onDelete={() => handleDelete(document.id)}
                 onShare={() => handleShare(document.id)}
               />
             ))}
-          </div>
+            </AnimatePresence>
+          </motion.div>
         )}
       </div>
     </AppShell>

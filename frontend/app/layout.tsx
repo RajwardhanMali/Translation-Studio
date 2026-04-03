@@ -1,6 +1,7 @@
 import type { Metadata } from 'next'
 import { ClerkProvider } from '@clerk/nextjs'
 import { Analytics } from '@vercel/analytics/next'
+import { MotionProvider } from '@/components/motion/primitives'
 import { ThemeProvider } from '@/components/theme-provider'
 import { Toaster } from '@/components/ui/toaster'
 import './globals.css'
@@ -29,9 +30,11 @@ export default function RootLayout({
             enableSystem
             disableTransitionOnChange
           >
-            {children}
-            <Toaster />
-            <Analytics />
+            <MotionProvider>
+              {children}
+              <Toaster />
+              <Analytics />
+            </MotionProvider>
           </ThemeProvider>
         </body>
       </html>

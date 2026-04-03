@@ -117,6 +117,25 @@ export interface ExportStatusResponse {
 
 export type ExportFormat = 'same' | 'docx' | 'pdf'
 
+export interface ShareRecipient {
+  clerkUserId: string
+  email: string
+  name: string | null
+  accessedAt: string
+}
+
+export interface ShareOverviewResponse {
+  ownedByDocument: Record<
+    string,
+    {
+      shareId: string
+      shareUrl: string
+      recipients: ShareRecipient[]
+    }
+  >
+  receivedDocumentIds: string[]
+}
+
 export async function uploadDocument(
   file: File,
   onUploadProgress?: (progress: number) => void
@@ -252,6 +271,19 @@ export async function createShareLink(documentId: string): Promise<{ shareId: st
 
   if (!response.ok) {
     throw new Error('Failed to create share link.')
+  }
+
+  return response.json()
+}
+
+export async function getShareOverview(): Promise<ShareOverviewResponse> {
+  const response = await fetch('/api/shares', {
+    method: 'GET',
+    cache: 'no-store',
+  })
+
+  if (!response.ok) {
+    throw new Error('Failed to load share overview.')
   }
 
   return response.json()

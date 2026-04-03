@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState, Suspense } from "react";
+import { AnimatePresence, motion } from "framer-motion";
 import { useSearchParams, useRouter } from "next/navigation";
 import {
   AlertTriangle,
@@ -25,6 +26,7 @@ import { AppShell } from "@/components/app-shell";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
+import { HoverCard, Reveal } from "@/components/motion/primitives";
 import {
   Select,
   SelectContent,
@@ -346,7 +348,12 @@ function SegmentRow({
     : "text-sm leading-7";
 
   return (
-    <div
+    <motion.div
+      layout
+      initial={{ opacity: 0, y: 18 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ duration: 0.35, ease: [0.22, 1, 0.36, 1] }}
+      whileHover={{ y: -3 }}
       className={cn(
         "relative overflow-hidden rounded-[1.6rem] border border-border/70 bg-card/90 shadow-[0_18px_50px_-34px_rgba(15,23,42,0.45)] transition-all duration-200 before:absolute before:inset-y-0 before:left-0 before:w-1.5",
         statusAccentMap[segment.status] ?? "before:bg-border",
@@ -356,16 +363,16 @@ function SegmentRow({
           "border-red-300/70 bg-red-50/70 dark:border-red-900/60 dark:bg-red-950/20",
       )}
     >
-      <div className="flex items-center justify-between gap-3 border-b border-border/60 px-4 py-3">
-        <div className="flex items-center gap-3">
+      <div className="flex flex-wrap items-start justify-between gap-3 border-b border-border/60 px-4 py-3">
+        <div className="flex min-w-0 items-start gap-3">
           <input
             type="checkbox"
             checked={selected}
             onChange={() => onSelect(segment.segment_id)}
             className="h-4 w-4 rounded accent-primary"
           />
-          <div>
-            <p className="text-xs font-semibold uppercase tracking-[0.2em] text-muted-foreground">
+          <div className="min-w-0">
+            <p className="truncate text-xs font-semibold uppercase tracking-[0.2em] text-muted-foreground">
               Segment {segment.segment_id}
             </p>
             <div className="mt-1 flex flex-wrap items-center gap-2">
@@ -400,7 +407,7 @@ function SegmentRow({
           </div>
         </div>
 
-        <div className="flex items-center gap-2">
+        <div className="flex w-full flex-wrap items-center gap-2 md:w-auto md:justify-end">
           {editingMode !== "none" ? (
             <>
               <Button
@@ -469,7 +476,7 @@ function SegmentRow({
       </div>
 
       <div className="grid gap-4 p-4 xl:grid-cols-[1fr_1fr]">
-        <div className="rounded-2xl border border-border/60 bg-background/65 p-4">
+        <div className="motion-card-subtle rounded-2xl border border-border/60 bg-background/65 p-4">
           <div className="mb-2 flex items-center justify-between gap-2">
             <p className="text-xs font-semibold uppercase tracking-[0.18em] text-muted-foreground">
               Source
@@ -488,7 +495,7 @@ function SegmentRow({
               autoFocus
             />
           ) : (
-            <p className={cn("text-foreground", sourceTextClass)}>
+            <p className={cn("break-words text-foreground", sourceTextClass)}>
               {segment.source_text}
             </p>
           )}
@@ -508,7 +515,7 @@ function SegmentRow({
             )}
         </div>
 
-        <div className="rounded-2xl border border-border/60 bg-background/65 p-4">
+        <div className="motion-card-subtle rounded-2xl border border-border/60 bg-background/65 p-4">
           <div className="mb-2 flex items-center gap-2">
             <p className="text-xs font-semibold uppercase tracking-[0.18em] text-muted-foreground">
               Translated Output
@@ -530,6 +537,7 @@ function SegmentRow({
           ) : (
             <p
               className={cn(
+                "break-words",
                 outputTextClass,
                 isTranslationError(segment.translated_text)
                   ? "text-red-700 dark:text-red-300"
@@ -582,7 +590,7 @@ function SegmentRow({
               {segment.tm_suggestions.map((tm, index) => (
                 <div
                   key={`${segment.segment_id}-tm-${index}-${tm.text}`}
-                  className="flex flex-col gap-3 rounded-2xl border border-border/60 bg-card/90 p-4 lg:flex-row lg:items-start lg:justify-between"
+                  className="motion-card-subtle flex flex-col gap-3 rounded-2xl border border-border/60 bg-card/90 p-4 lg:flex-row lg:items-start lg:justify-between"
                 >
                   <p className="flex-1 text-sm leading-7 text-foreground">
                     {tm.text}
@@ -618,7 +626,7 @@ function SegmentRow({
             </div>
           </div>
         )}
-    </div>
+    </motion.div>
   );
 }
 
@@ -652,6 +660,11 @@ function TranslatePageContent() {
   const [customSegments, setCustomSegments] = useState<WorkspaceSegment[]>([]);
   const [customSourceText, setCustomSourceText] = useState("");
   const [showCustomSegmentForm, setShowCustomSegmentForm] = useState(false);
+
+  const selectableIds = segments.map((segment) => segment.segment_id);
+  const allSelected =
+    selectableIds.length > 0 &&
+    selectableIds.every((segmentId) => selectedIds.has(segmentId));
 
   useEffect(() => {
     if (!docId) return;
@@ -1035,6 +1048,16 @@ function TranslatePageContent() {
     toast({ title: `${selectedIds.size} segments approved` });
   };
 
+  const handleSelectAll = () => {
+    setSelectedIds((prev) => {
+      if (allSelected) {
+        return new Set();
+      }
+
+      return new Set(selectableIds);
+    });
+  };
+
   const handleShare = async () => {
     if (!docId) return;
 
@@ -1081,65 +1104,21 @@ function TranslatePageContent() {
           ? `Document ${docId.slice(0, 20)}...  |  ${segments.length} segments in review`
           : "Open a document to start translating"
       }
-      actions={
-        <div className="flex items-center gap-2">
-          {selectedIds.size > 0 && (
-            <Button
-              size="sm"
-              variant="outline"
-              className="rounded-2xl"
-              onClick={() => void handleBulkApprove()}
-            >
-              <CheckCircle2 className="mr-1.5 h-3.5 w-3.5" />
-              Bulk Accept ({selectedIds.size})
-            </Button>
-          )}
-          <Button
-            size="sm"
-            variant="outline"
-            className="rounded-2xl"
-            onClick={() => void handleShare()}
-            disabled={!docId}
-          >
-            <Copy className="mr-1.5 h-3.5 w-3.5" />
-            Share
-          </Button>
-          <Button
-            size="sm"
-            variant="outline"
-            className="rounded-2xl"
-            onClick={() => void handleExport()}
-            disabled={exporting || !docId}
-            title="Download translated document"
-          >
-            {exporting ? (
-              <Spinner className="mr-1.5 h-3.5 w-3.5" />
-            ) : (
-              <Download className="mr-1.5 h-3.5 w-3.5" />
-            )}
-            Download
-          </Button>
-          <Button
-            size="sm"
-            variant="outline"
-            className="rounded-2xl"
-            onClick={() => router.push("/glossary")}
-          >
-            <BookOpen className="mr-1.5 h-3.5 w-3.5" />
-            Glossary
-            <ArrowRight className="ml-1.5 h-3.5 w-3.5" />
-          </Button>
-        </div>
-      }
     >
       <div className="space-y-6">
-        <section className="glass-panel hero-sheen overflow-hidden rounded-[2rem]">
+        <Reveal className="glass-panel hero-sheen overflow-hidden rounded-[2rem]">
           <div className="grid gap-6 px-6 py-6 lg:grid-cols-[1.2fr_0.8fr] lg:px-8 lg:py-8">
             <div>
-              <div className="inline-flex items-center gap-2 rounded-full border border-border/60 bg-background/70 px-3 py-1 text-xs font-medium text-muted-foreground">
+              <motion.div
+                initial={{ opacity: 0, y: 12 }}
+                whileInView={{ opacity: 1, y: 0 }}
+                viewport={{ once: true, amount: 0.4 }}
+                transition={{ duration: 0.4, delay: 0.08, ease: [0.22, 1, 0.36, 1] }}
+                className="inline-flex items-center gap-2 rounded-full border border-border/60 bg-background/70 px-3 py-1 text-xs font-medium text-muted-foreground"
+              >
                 <WandSparkles className="h-3.5 w-3.5 text-primary" />
                 Structured translation workspace
-              </div>
+              </motion.div>
               <h2 className="mt-4 max-w-2xl text-3xl font-semibold tracking-tight text-foreground md:text-4xl">
                 Review translations faster with a cleaner, calmer editor.
               </h2>
@@ -1148,10 +1127,10 @@ function TranslatePageContent() {
                 memory suggestions, and approve final copy without losing focus.
               </p>
 
-              <div className="mt-6 flex flex-col gap-3 md:flex-row md:flex-wrap md:items-center">
-                <div className="flex items-center gap-3 rounded-2xl border border-border/60 bg-background/75 px-4 py-3">
+              <div className="mt-6 grid gap-3 xl:grid-cols-3">
+                <div className="flex min-w-0 items-center gap-3 rounded-2xl border border-border/60 bg-background/75 px-4 py-3">
                   <Globe className="h-4 w-4 shrink-0 text-muted-foreground" />
-                  <div className="min-w-[180px]">
+                  <div className="min-w-0 flex-1">
                     <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">
                       Target Language
                     </p>
@@ -1173,7 +1152,7 @@ function TranslatePageContent() {
                   </div>
                 </div>
 
-                <div className="flex gap-3">
+                <div className="flex flex-wrap gap-3">
                   <Button
                     onClick={() => void handleTranslate()}
                     disabled={translating || !docId}
@@ -1204,8 +1183,8 @@ function TranslatePageContent() {
                   </Button>
                 </div>
 
-                <div className="flex items-center gap-3 rounded-2xl border border-border/60 bg-background/75 px-4 py-3">
-                  <div className="min-w-[180px]">
+                <div className="flex min-w-0 flex-col gap-3 rounded-2xl border border-border/60 bg-background/75 px-4 py-3 sm:flex-row sm:items-center">
+                  <div className="min-w-0 flex-1">
                     <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">
                       Export Format
                     </p>
@@ -1229,7 +1208,7 @@ function TranslatePageContent() {
                   </div>
                   <Button
                     variant="outline"
-                    className="h-11 rounded-2xl"
+                    className="h-11 rounded-2xl sm:shrink-0"
                     onClick={() => void handleExport()}
                     disabled={exporting || !exportStatus?.ready_to_export}
                     title={
@@ -1248,7 +1227,7 @@ function TranslatePageContent() {
                   {!exportStatus?.ready_to_export && exportStatus && (
                     <Button
                       variant="ghost"
-                      className="h-11 rounded-2xl"
+                      className="h-11 rounded-2xl sm:shrink-0"
                       onClick={() => void handleExport()}
                       disabled={exporting}
                     >
@@ -1281,9 +1260,13 @@ function TranslatePageContent() {
                   value: `${flaggedCount}`,
                   note: "Errors or glossary alerts",
                 },
-              ].map((item) => (
-                <div
+              ].map((item, index) => (
+                <HoverCard
                   key={item.label}
+                  initial={{ opacity: 0, y: 20 }}
+                  whileInView={{ opacity: 1, y: 0 }}
+                  viewport={{ once: true, amount: 0.25 }}
+                  transition={{ duration: 0.45, delay: index * 0.06, ease: [0.22, 1, 0.36, 1] }}
                   className="rounded-[1.5rem] border border-border/60 bg-background/78 p-4 shadow-[0_18px_40px_-34px_rgba(15,23,42,0.55)]"
                 >
                   <p className="text-xs font-semibold uppercase tracking-[0.18em] text-muted-foreground">
@@ -1295,14 +1278,14 @@ function TranslatePageContent() {
                   <p className="mt-1 text-sm text-muted-foreground">
                     {item.note}
                   </p>
-                </div>
+                </HoverCard>
               ))}
             </div>
           </div>
-        </section>
+        </Reveal>
 
         <section className="grid items-start gap-4 xl:grid-cols-[minmax(0,1fr)_310px]">
-          <Card className="glass-panel self-start rounded-[1.75rem] border-border/70 p-5">
+          <Reveal delay={0.05} className="glass-panel self-start rounded-[1.75rem] border border-border/70 p-5">
             <div className="flex flex-col gap-4">
               <div>
                 <p className="text-xs font-semibold uppercase tracking-[0.18em] text-muted-foreground">
@@ -1331,6 +1314,32 @@ function TranslatePageContent() {
             </div>
 
             <div className="mt-5 flex flex-wrap gap-2">
+              <Button
+                variant="outline"
+                className="rounded-full"
+                onClick={handleSelectAll}
+              >
+                {allSelected ? "Clear Selection" : "Select All"}
+              </Button>
+              {selectedIds.size > 0 && (
+                <Button
+                  variant="outline"
+                  className="rounded-full"
+                  onClick={() => void handleBulkApprove()}
+                >
+                  <CheckCircle2 className="mr-2 h-4 w-4" />
+                  Bulk Accept ({selectedIds.size})
+                </Button>
+              )}
+              <Button
+                variant="outline"
+                className="rounded-full"
+                onClick={() => void handleShare()}
+                disabled={!docId}
+              >
+                <Copy className="mr-2 h-4 w-4" />
+                Share
+              </Button>
               <Button
                 variant="outline"
                 className="rounded-full"
@@ -1437,9 +1446,9 @@ function TranslatePageContent() {
                 </div>
               </div>
             )}
-          </Card>
+          </Reveal>
 
-          <Card className="glass-panel self-start rounded-[1.75rem] border-border/70 p-5">
+          <Reveal delay={0.1} className="glass-panel self-start rounded-[1.75rem] border border-border/70 p-5">
             <p className="text-xs font-semibold uppercase tracking-[0.18em] text-muted-foreground">
               Legend
             </p>
@@ -1447,7 +1456,7 @@ function TranslatePageContent() {
               {(["pending", "reviewed", "approved"] as const).map((status) => (
                 <div
                   key={status}
-                  className="flex items-center justify-between rounded-2xl border border-border/60 bg-background/70 px-3 py-2"
+                  className="motion-card-subtle flex items-center justify-between rounded-2xl border border-border/60 bg-background/70 px-3 py-2"
                 >
                   <span className="text-sm text-foreground capitalize">
                     {status}
@@ -1457,7 +1466,7 @@ function TranslatePageContent() {
               ))}
             </div>
 
-            <div className="mt-5 rounded-2xl border border-border/60 bg-background/70 p-4">
+            <div className="motion-card-subtle mt-5 rounded-2xl border border-border/60 bg-background/70 p-4">
               <p className="text-xs font-semibold uppercase tracking-[0.18em] text-muted-foreground">
                 TM Match Types
               </p>
@@ -1467,7 +1476,7 @@ function TranslatePageContent() {
                 <TmMatchBadge tmMatchType="new" />
               </div>
             </div>
-          </Card>
+          </Reveal>
         </section>
 
         {exportStatus &&
@@ -1485,17 +1494,17 @@ function TranslatePageContent() {
             segment.glossary_violations &&
             segment.glossary_violations.length > 0,
         ) && (
-          <div className="glass-panel flex items-center gap-3 rounded-[1.5rem] border border-amber-300/60 bg-amber-100/75 px-5 py-4 dark:border-amber-800/60 dark:bg-amber-950/35">
+          <Reveal className="glass-panel flex items-center gap-3 rounded-[1.5rem] border border-amber-300/60 bg-amber-100/75 px-5 py-4 dark:border-amber-800/60 dark:bg-amber-950/35">
             <AlertTriangle className="h-4 w-4 shrink-0 text-amber-700 dark:text-amber-300" />
             <p className="text-sm text-amber-800 dark:text-amber-200">
               Some segments contain glossary term violations. They are
               highlighted inline for faster review.
             </p>
-          </div>
+          </Reveal>
         )}
 
         {loading ? (
-          <div className="glass-panel flex flex-col items-center gap-4 rounded-[2rem] py-24">
+          <div className="glass-panel motion-fade-in flex flex-col items-center gap-4 rounded-[2rem] py-24">
             <Spinner className="h-8 w-8 text-primary" />
             <p className="text-sm text-muted-foreground">Loading segments...</p>
           </div>
@@ -1513,21 +1522,23 @@ function TranslatePageContent() {
             </p>
           </div>
         ) : (
-          <section className="space-y-4">
-            {segments.map((segment, index) => (
-              <SegmentRow
-                key={`${segment.segment_id}-${index}`}
-                segment={segment}
-                selected={selectedIds.has(segment.segment_id)}
-                onSelect={toggleSelect}
-                onApprove={handleApprove}
-                onUpdateOutput={handleUpdateOutput}
-                onUpdateSource={handleUpdateSource}
-                onRetry={handleRetry}
-                retrying={retryingId === segment.segment_id}
-              />
-            ))}
-          </section>
+          <motion.section layout className="space-y-4 overflow-hidden">
+            <AnimatePresence mode="popLayout">
+              {segments.map((segment, index) => (
+                <SegmentRow
+                  key={`${segment.segment_id}-${index}`}
+                  segment={segment}
+                  selected={selectedIds.has(segment.segment_id)}
+                  onSelect={toggleSelect}
+                  onApprove={handleApprove}
+                  onUpdateOutput={handleUpdateOutput}
+                  onUpdateSource={handleUpdateSource}
+                  onRetry={handleRetry}
+                  retrying={retryingId === segment.segment_id}
+                />
+              ))}
+            </AnimatePresence>
+          </motion.section>
         )}
       </div>
     </AppShell>

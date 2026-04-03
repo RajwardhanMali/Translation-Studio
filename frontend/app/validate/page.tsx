@@ -1,9 +1,11 @@
 'use client'
 
 import { Suspense, useEffect, useMemo, useState } from 'react'
+import { AnimatePresence, motion } from 'framer-motion'
 import { useRouter, useSearchParams } from 'next/navigation'
 import { AlertTriangle, ArrowRight, CheckCircle2, ChevronDown, ChevronUp, Info, RefreshCw, ShieldCheck, Wand2 } from 'lucide-react'
 import { AppShell } from '@/components/app-shell'
+import { HoverCard, Reveal } from '@/components/motion/primitives'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
@@ -46,7 +48,7 @@ function ValidationCard({
   const hasWarning = visibleIssues.some((issue) => issue.severity === 'warning')
 
   return (
-    <Card className="overflow-hidden rounded-2xl border-border/70">
+    <HoverCard layout className="overflow-hidden rounded-2xl border border-border/70 bg-card">
       <button
         className="flex w-full items-start gap-3 px-4 py-4 text-left transition-colors hover:bg-muted/30"
         onClick={() => setExpanded((value) => !value)}
@@ -110,7 +112,7 @@ function ValidationCard({
           )}
         </div>
       )}
-    </Card>
+    </HoverCard>
   )
 }
 
@@ -207,8 +209,9 @@ function ValidationPageContent() {
     <AppShell
       title="Validation"
       subtitle={docId ? `Document ${docId.slice(0, 20)}...` : 'Validation results'}
-      actions={
-        <div className="flex gap-2">
+    >
+      <div className="mx-auto max-w-4xl space-y-5">
+        <Reveal className="flex flex-wrap justify-end gap-2">
           <Button variant="outline" size="sm" className="rounded-xl" onClick={() => void loadValidation(true)} disabled={loading}>
             <RefreshCw className={cn('mr-1.5 h-3.5 w-3.5', loading && 'animate-spin')} />
             Re-check
@@ -217,18 +220,23 @@ function ValidationPageContent() {
             Continue
             <ArrowRight className="ml-1.5 h-3.5 w-3.5" />
           </Button>
-        </div>
-      }
-    >
-      <div className="mx-auto max-w-4xl space-y-5">
+        </Reveal>
+
         <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
           {[
             { label: 'Segments with issues', value: results.length, icon: ShieldCheck },
             { label: 'Errors', value: counts.error, icon: AlertTriangle },
             { label: 'Warnings', value: counts.warning, icon: AlertTriangle },
             { label: 'Info', value: counts.info, icon: Info },
-          ].map((item) => (
-            <Card key={item.label} className="rounded-2xl border-border/70 p-4">
+          ].map((item, index) => (
+            <motion.div
+              key={item.label}
+              initial={{ opacity: 0, y: 18 }}
+              whileInView={{ opacity: 1, y: 0 }}
+              viewport={{ once: true, amount: 0.25 }}
+              transition={{ duration: 0.45, delay: index * 0.07, ease: [0.22, 1, 0.36, 1] }}
+            >
+            <Card className="rounded-2xl border-border/70 p-4">
               <div className="flex items-center gap-3">
                 <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-muted">
                   <item.icon className="h-4 w-4 text-foreground" />
@@ -239,6 +247,7 @@ function ValidationPageContent() {
                 </div>
               </div>
             </Card>
+            </motion.div>
           ))}
         </div>
 
@@ -255,7 +264,7 @@ function ValidationPageContent() {
           </Card>
         ) : hasLoaded ? (
           <div className="space-y-4">
-            <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-border/70 bg-background/70 px-4 py-3">
+            <Reveal className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-border/70 bg-background/70 px-4 py-3">
               <p className="text-sm text-foreground">
                 {results.length} segment{results.length === 1 ? '' : 's'} need attention.
               </p>
@@ -264,22 +273,32 @@ function ValidationPageContent() {
                   {showInfo ? 'Hide info items' : `Show info items (${counts.info})`}
                 </button>
               )}
-            </div>
+            </Reveal>
 
             {visibleResults.length === 0 ? (
               <Card className="rounded-2xl border-border/70 p-5 text-sm text-muted-foreground">
                 Only informational notes were returned. Turn on info items to review them.
               </Card>
             ) : (
-              visibleResults.map((result, index) => (
-                <ValidationCard
-                  key={result.segment_id ?? `${result.text}-${index}`}
-                  result={result}
-                  showInfo={showInfo}
-                  onApplyFix={() => handleApplyFix(result)}
-                  applying={applyingId === result.segment_id}
-                />
-              ))
+              <AnimatePresence mode="popLayout">
+                {visibleResults.map((result, index) => (
+                  <motion.div
+                    key={result.segment_id ?? `${result.text}-${index}`}
+                    layout
+                    initial={{ opacity: 0, y: 18 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    exit={{ opacity: 0, y: -10 }}
+                    transition={{ duration: 0.35, delay: index * 0.03, ease: [0.22, 1, 0.36, 1] }}
+                  >
+                    <ValidationCard
+                      result={result}
+                      showInfo={showInfo}
+                      onApplyFix={() => handleApplyFix(result)}
+                      applying={applyingId === result.segment_id}
+                    />
+                  </motion.div>
+                ))}
+              </AnimatePresence>
             )}
           </div>
         ) : null}

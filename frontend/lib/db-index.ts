@@ -1,6 +1,12 @@
 import { drizzle } from 'drizzle-orm/node-postgres'
 import { Pool } from 'pg'
-import * as schema from './db/schema'
+import * as coreSchema from './db/schema'
+import * as shareSchema from './share-access-schema'
+
+const schema = {
+  ...coreSchema,
+  ...shareSchema,
+}
 
 const globalForDb = globalThis as typeof globalThis & {
   __translationStudioPool?: Pool
