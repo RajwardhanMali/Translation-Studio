@@ -166,7 +166,7 @@ function ValidationPageContent() {
           }
           return acc
         },
-        { warning: 0, info: 0 }
+        { error: 0, warning: 0, info: 0 }
       ),
     [results]
   )
@@ -221,9 +221,10 @@ function ValidationPageContent() {
       }
     >
       <div className="mx-auto max-w-4xl space-y-5">
-        <div className="grid gap-4 sm:grid-cols-3">
+        <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
           {[
             { label: 'Segments with issues', value: results.length, icon: ShieldCheck },
+            { label: 'Errors', value: counts.error, icon: AlertTriangle },
             { label: 'Warnings', value: counts.warning, icon: AlertTriangle },
             { label: 'Info', value: counts.info, icon: Info },
           ].map((item) => (

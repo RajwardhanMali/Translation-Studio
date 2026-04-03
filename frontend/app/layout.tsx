@@ -1,17 +1,14 @@
 import type { Metadata } from 'next'
-import { Inter, Geist_Mono } from 'next/font/google'
+import { ClerkProvider } from '@clerk/nextjs'
 import { Analytics } from '@vercel/analytics/next'
 import { ThemeProvider } from '@/components/theme-provider'
 import { Toaster } from '@/components/ui/toaster'
 import './globals.css'
 
-const inter = Inter({ subsets: ['latin'], variable: '--font-inter' })
-const geistMono = Geist_Mono({ subsets: ['latin'], variable: '--font-geist-mono' })
-
 export const metadata: Metadata = {
-  title: 'Syntra AI',
-  description: 'Translation workspace with validation, glossary, segment review, and export tools.',
-  generator: 'v0.app',
+  title: 'Translation Studio',
+  description: 'Premium translation workspace for validation, multilingual review, glossary control, and export.',
+  generator: 'Codex',
 }
 
 export default function RootLayout({
@@ -20,14 +17,24 @@ export default function RootLayout({
   children: React.ReactNode
 }>) {
   return (
-    <html lang="en" suppressHydrationWarning>
-      <body className={`${inter.variable} ${geistMono.variable} font-sans antialiased`}>
-        <ThemeProvider attribute="class" defaultTheme="system" enableSystem disableTransitionOnChange>
-          {children}
-          <Toaster />
-          <Analytics />
-        </ThemeProvider>
-      </body>
-    </html>
-  )
+    <ClerkProvider>
+      <html lang="en" suppressHydrationWarning>
+        <body
+          className="font-sans antialiased"
+          cz-shortcut-listen="true"
+        >
+          <ThemeProvider
+            attribute="class"
+            defaultTheme="system"
+            enableSystem
+            disableTransitionOnChange
+          >
+            {children}
+            <Toaster />
+            <Analytics />
+          </ThemeProvider>
+        </body>
+      </html>
+    </ClerkProvider>
+  );
 }

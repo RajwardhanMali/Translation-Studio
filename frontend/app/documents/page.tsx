@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from 'react'
 import { useRouter } from 'next/navigation'
-import { ArrowRight, File, FileText, FolderOpen, Loader2, RefreshCw, Trash2 } from 'lucide-react'
+import { ArrowRight, File, FileText, FolderOpen, Link2, Loader2, RefreshCw, Sparkles, Trash2 } from 'lucide-react'
 import {
   AlertDialog,
   AlertDialogAction,
@@ -20,7 +20,7 @@ import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
 import { Spinner } from '@/components/ui/spinner'
 import { useToast } from '@/hooks/use-toast'
-import { deleteDocument, getDocuments, type DocumentSummary } from '@/lib/api'
+import { createShareLink, deleteDocument, getDocuments, type DocumentSummary } from '@/lib/api'
 import { cn } from '@/lib/utils'
 
 function formatRelativeTime(value: string) {
@@ -98,11 +98,13 @@ function DocumentCard({
   deleting,
   onOpen,
   onDelete,
+  onShare,
 }: {
   document: DocumentSummary
   deleting: boolean
   onOpen: () => void
   onDelete: () => Promise<void>
+  onShare: () => Promise<void>
 }) {
   const FileIcon = document.file_type === 'pdf' ? FileText : File
 
@@ -119,6 +121,9 @@ function DocumentCard({
               <div className="mt-1 flex flex-wrap items-center gap-2">
                 <FileTypeBadge fileType={document.file_type} />
                 <span className="text-xs text-muted-foreground">{document.blocks_count} blocks</span>
+                {document.created_at ? (
+                  <span className="text-xs text-muted-foreground">{formatRelativeTime(document.created_at)}</span>
+                ) : null}
               </div>
             </div>
           </div>
@@ -137,6 +142,10 @@ function DocumentCard({
         </div>
 
         <div className="flex justify-end gap-2">
+          <Button variant="outline" className="rounded-xl" onClick={() => void onShare()}>
+            <Link2 className="mr-1.5 h-4 w-4" />
+            Share
+          </Button>
           <Button variant="outline" className="rounded-xl" onClick={onOpen}>
             Open
             <ArrowRight className="ml-1.5 h-4 w-4" />
@@ -244,6 +253,24 @@ export default function DocumentsPage() {
     }
   }
 
+  const handleShare = async (documentId: string) => {
+    try {
+      const share = await createShareLink(documentId)
+      const absoluteUrl = `${window.location.origin}${share.shareUrl}`
+      await navigator.clipboard.writeText(absoluteUrl)
+      toast({
+        title: 'Share link copied',
+        description: 'The link has been copied to your clipboard.',
+      })
+    } catch {
+      toast({
+        title: 'Share link failed',
+        description: 'We could not create a share link for this document.',
+        variant: 'destructive',
+      })
+    }
+  }
+
   return (
     <AppShell
       title="Documents"
@@ -254,13 +281,40 @@ export default function DocumentsPage() {
             <RefreshCw className={cn('mr-1.5 h-4 w-4', refreshing && 'animate-spin')} />
             Refresh
           </Button>
-          <Button className="rounded-xl" onClick={() => router.push('/')}>
+          <Button className="rounded-xl" onClick={() => router.push('/upload')}>
             Upload Document
           </Button>
         </div>
       }
     >
       <div className="space-y-5">
+        <section className="hero-sheen overflow-hidden rounded-[2rem] border border-border/70">
+          <div className="grid gap-6 px-6 py-7 lg:grid-cols-[1.2fr_0.8fr] lg:px-8">
+            <div>
+              <p className="text-xs font-semibold uppercase tracking-[0.22em] text-primary">Document operations</p>
+              <h2 className="mt-3 text-3xl font-semibold tracking-tight text-foreground md:text-4xl">
+                Your active translation pipeline, ready to reopen, review, and share.
+              </h2>
+              <p className="mt-3 max-w-2xl text-sm leading-7 text-muted-foreground md:text-base">
+                Monitor progress across uploaded files, jump back into translation, and generate secure share links
+                when reviewers need access to the same document context.
+              </p>
+            </div>
+
+            <Card className="rounded-[1.75rem] border-border/60 bg-background/75 p-5">
+              <div className="flex items-center gap-3">
+                <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-primary/10 text-primary">
+                  <Sparkles className="h-5 w-5" />
+                </div>
+                <div>
+                  <p className="text-sm font-semibold text-foreground">Team-ready workflow</p>
+                  <p className="text-sm text-muted-foreground">Share links route collaborators into the right file after login.</p>
+                </div>
+              </div>
+            </Card>
+          </div>
+        </section>
+
         <div className="grid gap-4 md:grid-cols-4">
           {[
             { label: 'Documents', value: totals.total },
@@ -289,7 +343,7 @@ export default function DocumentsPage() {
               <p className="text-lg font-semibold text-foreground">No documents yet</p>
               <p className="text-sm text-muted-foreground">Upload one to get started.</p>
             </div>
-            <Button className="rounded-xl" onClick={() => router.push('/')}>
+            <Button className="rounded-xl" onClick={() => router.push('/upload')}>
               Upload Document
             </Button>
           </Card>
@@ -302,6 +356,7 @@ export default function DocumentsPage() {
                 deleting={deletingId === document.id}
                 onOpen={() => router.push(`/translate?doc=${document.id}`)}
                 onDelete={() => handleDelete(document.id)}
+                onShare={() => handleShare(document.id)}
               />
             ))}
           </div>

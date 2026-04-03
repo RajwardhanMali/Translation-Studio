@@ -3,7 +3,9 @@
 import Link from 'next/link'
 import { usePathname } from 'next/navigation'
 import { useEffect, useState } from 'react'
-import { Activity, BookOpen, FolderOpen, Languages, Menu, Upload, X } from 'lucide-react'
+import { UserButton, useAuth } from '@clerk/nextjs'
+import { Activity, BookOpen, FolderOpen, Languages, Link2, Menu, Sparkles, Upload, X } from 'lucide-react'
+import { AuthSync } from '@/components/auth/auth-sync'
 import { ThemeToggle } from '@/components/theme-toggle'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { checkHealth, getTranslateInfo, type TranslateInfoResponse } from '@/lib/api'
@@ -11,7 +13,7 @@ import { cn } from '@/lib/utils'
 
 const NAV_ITEMS = [
   { href: '/documents', label: 'Documents', icon: FolderOpen, description: 'Library and progress' },
-  { href: '/', label: 'Upload', icon: Upload, description: 'Import PDF or DOCX' },
+  { href: '/upload', label: 'Upload', icon: Upload, description: 'Import PDF or DOCX' },
   { href: '/translate', label: 'Translate', icon: Languages, description: 'Review and export' },
   { href: '/glossary', label: 'Glossary', icon: BookOpen, description: 'Manage term pairs' },
 ]
@@ -25,6 +27,7 @@ interface AppShellProps {
 
 export function AppShell({ children, title, subtitle, actions }: AppShellProps) {
   const pathname = usePathname()
+  const { isSignedIn } = useAuth()
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const [apiStatus, setApiStatus] = useState<'checking' | 'online' | 'offline'>('checking')
   const [translateInfo, setTranslateInfo] = useState<TranslateInfoResponse | null>(null)
@@ -50,25 +53,27 @@ export function AppShell({ children, title, subtitle, actions }: AppShellProps) 
   const groqKeyMissing = translateInfo?.backend === 'groq' && translateInfo.key_set === false
 
   return (
-    <div className="flex min-h-screen bg-transparent">
+    <div className="flex h-screen overflow-hidden bg-transparent">
+      <AuthSync />
+
       {sidebarOpen && (
         <div className="fixed inset-0 z-20 bg-black/30 backdrop-blur-sm lg:hidden" onClick={() => setSidebarOpen(false)} />
       )}
 
       <aside
         className={cn(
-          'fixed inset-y-0 left-0 z-30 flex w-72 flex-col border-r border-sidebar-border bg-sidebar/96 transition-transform duration-300 lg:relative lg:translate-x-0',
+          'fixed inset-y-0 left-0 z-30 flex w-72 flex-col border-r border-sidebar-border bg-sidebar/96 transition-transform duration-300 lg:translate-x-0',
           sidebarOpen ? 'translate-x-0 shadow-xl shadow-slate-900/10' : '-translate-x-full'
         )}
       >
         <div className="border-b border-sidebar-border px-5 py-5">
           <div className="flex items-center gap-3">
-            <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-sidebar-primary text-sidebar-primary-foreground">
+            <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-[linear-gradient(135deg,#0f172a,#155dfc,#16c5ff)] text-white shadow-lg shadow-cyan-500/15">
               <Languages className="h-5 w-5" />
             </div>
             <div>
-              <p className="text-base font-semibold leading-none text-sidebar-foreground">Syntra AI</p>
-              <p className="mt-1 text-xs text-sidebar-muted-foreground">Structured review workspace</p>
+              <p className="text-base font-semibold leading-none text-sidebar-foreground">Translation Studio</p>
+              <p className="mt-1 text-xs text-sidebar-muted-foreground">Premium review workspace</p>
             </div>
             <button
               className="ml-auto rounded-xl p-2 text-sidebar-muted-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground lg:hidden"
@@ -119,6 +124,23 @@ export function AppShell({ children, title, subtitle, actions }: AppShellProps) 
               </Link>
             )
           })}
+
+          <div className="mt-6 px-3">
+            <div className="rounded-[1.6rem] border border-sidebar-border bg-[linear-gradient(180deg,rgba(12,22,42,0.96),rgba(22,40,78,0.94))] p-4 text-white shadow-[0_20px_50px_-35px_rgba(0,0,0,0.7)]">
+              <div className="inline-flex items-center gap-2 rounded-full border border-white/15 bg-white/10 px-3 py-1 text-[10px] font-semibold uppercase tracking-[0.2em] text-cyan-100">
+                <Sparkles className="h-3 w-3" />
+                Collaborative
+              </div>
+              <p className="mt-4 text-sm font-semibold">Need to loop in a reviewer?</p>
+              <p className="mt-2 text-xs leading-6 text-slate-300">
+                Generate a share link from any document and send teammates directly into the same translation context.
+              </p>
+              <div className="mt-4 flex items-center gap-2 text-xs text-cyan-100">
+                <Link2 className="h-3.5 w-3.5" />
+                Redirect-safe access after sign-in
+              </div>
+            </div>
+          </div>
         </nav>
 
         <div className="border-t border-sidebar-border p-4">
@@ -149,7 +171,7 @@ export function AppShell({ children, title, subtitle, actions }: AppShellProps) 
         </div>
       </aside>
 
-      <div className="flex min-w-0 flex-1 flex-col">
+      <div className="flex min-w-0 flex-1 flex-col lg:pl-72">
         <header className="sticky top-0 z-10 flex h-18 items-center gap-4 border-b border-border/70 bg-background/88 px-4 backdrop-blur md:px-6">
           <button
             className="rounded-xl p-2 text-muted-foreground hover:bg-muted lg:hidden"
@@ -185,7 +207,29 @@ export function AppShell({ children, title, subtitle, actions }: AppShellProps) 
             </Tooltip>
           )}
 
+          {isSignedIn ? (
+            <div className="hidden items-center gap-2 rounded-full border border-border/70 bg-background/80 px-3 py-1.5 md:flex">
+              <div className="flex h-7 w-7 items-center justify-center rounded-full bg-primary/10 text-primary">
+                <Sparkles className="h-3.5 w-3.5" />
+              </div>
+              <div>
+                <p className="text-[11px] font-medium text-foreground">Authenticated workspace</p>
+                <p className="text-[10px] text-muted-foreground">Synced to app database</p>
+              </div>
+            </div>
+          ) : null}
+
           <ThemeToggle />
+          {isSignedIn ? (
+            <UserButton
+              appearance={{
+                elements: {
+                  avatarBox: 'h-10 w-10',
+                  userButtonPopoverCard: 'rounded-2xl',
+                },
+              }}
+            />
+          ) : null}
           {actions && <div className="flex shrink-0 items-center gap-2">{actions}</div>}
         </header>
 
