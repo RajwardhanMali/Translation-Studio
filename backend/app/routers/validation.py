@@ -5,15 +5,15 @@ Endpoints:
   POST /validate              — Validate a document or text for quality issues
   POST /validate/apply-fixes  — Auto-apply AI-suggested fixes to segments
   POST /validate/edit-segment — Manually edit a segment's source text
-
-When validating by document_id, automatically loads document classification
-context (type, domain, register) to provide domain-aware validation.
 """
 
 import logging
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Depends
 from typing import List
+from sqlalchemy.orm import Session
 
+from app.database import get_db
+from app.models.domain import Document, Segment as SegmentDB
 from app.models.schemas import (
     ValidateRequest,
     ValidationResult,
@@ -28,10 +28,6 @@ from app.services.validator import (
     apply_ai_fixes,
     update_segment_text,
 )
-from app.utils.file_handler import (
-    load_segmented_document,
-    save_segmented_document,
-)
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/validate", tags=["validation"])
@@ -42,37 +38,25 @@ router = APIRouter(prefix="/validate", tags=["validation"])
 # ---------------------------------------------------------------------------
 
 @router.post("", response_model=List[ValidationResult])
-async def validate(request: ValidateRequest):
-    """
-    Validate source content for quality issues.
-
-    Modes:
-    - Provide `document_id` → validate all segments of that document.
-      Automatically loads document classification for context-aware validation.
-    - Provide `text` → validate a single arbitrary text string.
-
-    Set `auto_fix: true` to receive auto-corrected text (double spaces only).
-    Set `enable_ai: true` to activate LLM-powered comprehensive validation
-    (spelling, grammar, consistency, punctuation, formatting).
-    """
+async def validate(request: ValidateRequest, db: Session = Depends(get_db)):
     results: List[ValidationResult] = []
 
     if request.document_id:
-        data = load_segmented_document(request.document_id)
-        if data is None:
-            raise HTTPException(
-                status_code=404,
-                detail=f"Document '{request.document_id}' not found.",
-            )
+        doc = db.query(Document).filter(Document.id == request.document_id).first()
+        if not doc:
+            raise HTTPException(status_code=404, detail=f"Document '{request.document_id}' not found.")
+            
+        db_segments = db.query(SegmentDB).filter(SegmentDB.document_id == request.document_id).all()
+        segments_data = [{"id": s.id, "text": s.text} for s in db_segments]
 
-        classification = data.get("metadata", {}).get("classification", {})
+        classification = doc.metadata_json.get("classification", {}) if doc.metadata_json else None
 
         raw_results = validate_segments(
-            segments=data.get("segments", []),
+            segments=segments_data,
             auto_fix=request.auto_fix,
             enable_ai=request.enable_ai,
             min_issue_severity=request.min_issue_severity,
-            document_context=classification if classification else None,
+            document_context=classification,
         )
         for r in raw_results:
             results.append(ValidationResult(
@@ -114,41 +98,33 @@ async def validate(request: ValidateRequest):
 # ---------------------------------------------------------------------------
 
 @router.post("/apply-fixes", response_model=ApplyFixesResponse)
-async def apply_fixes(request: ApplyFixesRequest):
-    """
-    Auto-apply AI-suggested fixes to document segments.
+async def apply_fixes(request: ApplyFixesRequest, db: Session = Depends(get_db)):
+    doc = db.query(Document).filter(Document.id == request.document_id).first()
+    if not doc:
+        raise HTTPException(status_code=404, detail=f"Document '{request.document_id}' not found.")
 
-    Runs AI validation on the specified segments (or all segments if
-    segment_ids is null), then applies the suggested corrections
-    directly to the segment text.
-
-    Only applies fixes for issues with severity "error" or "warning".
-    The original text is returned alongside the fixed text for review.
-
-    The updated segments are persisted to disk.
-    """
-    data = load_segmented_document(request.document_id)
-    if data is None:
-        raise HTTPException(
-            status_code=404,
-            detail=f"Document '{request.document_id}' not found.",
-        )
-
-    segments = data.get("segments", [])
-    classification = data.get("metadata", {}).get("classification", {})
+    db_segments = db.query(SegmentDB).filter(SegmentDB.document_id == request.document_id).all()
+    segments_data = [{"id": s.id, "text": s.text, "status": s.status} for s in db_segments]
+    
+    classification = doc.metadata_json.get("classification", {}) if doc.metadata_json else None
 
     result = apply_ai_fixes(
-        segments=segments,
+        segments=segments_data,
         segment_ids=request.segment_ids,
-        document_context=classification if classification else None,
+        document_context=classification,
     )
 
     # Persist updated segments
-    save_segmented_document(request.document_id, data)
-    logger.info(
-        f"Applied AI fixes to {result['fixed_count']} segments "
-        f"in doc {request.document_id}"
-    )
+    for s_data in segments_data:
+        # Find matching DB object and update
+        for db_s in db_segments:
+            if db_s.id == s_data["id"]:
+                db_s.text = s_data["text"]
+                db_s.status = s_data["status"]
+                break
+                
+    db.commit()
+    logger.info(f"Applied AI fixes to {result['fixed_count']} segments in doc {request.document_id}")
 
     return ApplyFixesResponse(
         document_id=request.document_id,
@@ -162,26 +138,16 @@ async def apply_fixes(request: ApplyFixesRequest):
 # ---------------------------------------------------------------------------
 
 @router.post("/edit-segment", response_model=EditSegmentResponse)
-async def edit_segment(request: EditSegmentRequest):
-    """
-    Manually edit a segment's source text.
+async def edit_segment(request: EditSegmentRequest, db: Session = Depends(get_db)):
+    doc = db.query(Document).filter(Document.id == request.document_id).first()
+    if not doc:
+        raise HTTPException(status_code=404, detail=f"Document '{request.document_id}' not found.")
 
-    Use this when the user wants to correct a flagged segment before
-    translation. The segment's status is set to "edited".
-
-    The updated segment is persisted to disk.
-    """
-    data = load_segmented_document(request.document_id)
-    if data is None:
-        raise HTTPException(
-            status_code=404,
-            detail=f"Document '{request.document_id}' not found.",
-        )
-
-    segments = data.get("segments", [])
+    db_segments = db.query(SegmentDB).filter(SegmentDB.document_id == request.document_id).all()
+    segments_data = [{"id": s.id, "text": s.text, "status": s.status} for s in db_segments]
 
     result = update_segment_text(
-        segments=segments,
+        segments=segments_data,
         segment_id=request.segment_id,
         new_text=request.new_text,
     )
@@ -189,11 +155,16 @@ async def edit_segment(request: EditSegmentRequest):
     if result is None:
         raise HTTPException(
             status_code=404,
-            detail=f"Segment '{request.segment_id}' not found in document '{request.document_id}'.",
+            detail=f"Segment '{request.segment_id}' not found.",
         )
 
-    # Persist
-    save_segmented_document(request.document_id, data)
+    for db_s in db_segments:
+        if db_s.id == request.segment_id:
+            db_s.text = request.new_text
+            db_s.status = "edited"  # standard behavior from update_segment_text
+            break
+            
+    db.commit()
     logger.info(f"Segment {request.segment_id} edited in doc {request.document_id}")
 
     return EditSegmentResponse(**result)

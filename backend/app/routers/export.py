@@ -8,40 +8,34 @@ import logging
 from pathlib import Path
 from typing import Literal, Optional
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Depends
 from fastapi.responses import FileResponse
+from sqlalchemy.orm import Session
 
-from app.utils.file_handler import (
-    load_parsed_document,
-    load_segmented_document,
-    EXPORTS_DIR,
-)
+from app.database import get_db
+from app.models.domain import Document, Segment as SegmentDB
 from app.services.regenerator import regenerate_document
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/export", tags=["export"])
 
-
-# ---------------------------------------------------------------------------
-# GET /export/status/{document_id}
-# ---------------------------------------------------------------------------
-
 @router.get("/status/{document_id}")
-async def export_status(document_id: str):
+async def export_status(document_id: str, db: Session = Depends(get_db)):
     """
-    Returns translation completeness stats and whether the document
-    is ready to export (all segments reviewed or approved).
+    Returns translation completeness stats.
     """
-    seg_data = load_segmented_document(document_id)
-    if seg_data is None:
+    doc = db.query(Document).filter(Document.id == document_id).first()
+    if not doc:
         raise HTTPException(status_code=404, detail=f"Document '{document_id}' not found.")
-
-    segments = [s for s in seg_data.get("segments", []) if s.get("status") != "skip"]
+        
+    db_segments = db.query(SegmentDB).filter(SegmentDB.document_id == document_id).all()
+    
+    segments = [s for s in db_segments if s.status != "skip"]
     total    = len(segments)
-    pending  = sum(1 for s in segments if s.get("status") == "pending")
-    reviewed = sum(1 for s in segments if s.get("status") == "reviewed")
-    approved = sum(1 for s in segments if s.get("status") == "approved")
-    errors   = sum(1 for s in segments if (s.get("translated_text") or "").startswith("[ERROR"))
+    pending  = sum(1 for s in segments if s.status == "pending")
+    reviewed = sum(1 for s in segments if s.status == "reviewed")
+    approved = sum(1 for s in segments if s.status == "approved")
+    errors   = sum(1 for s in segments if (s.translated_text or "").startswith("[ERROR"))
 
     translated = reviewed + approved
     progress   = round(translated / total * 100, 1) if total else 0.0
@@ -62,82 +56,74 @@ async def export_status(document_id: str):
         ),
     }
 
-
-# ---------------------------------------------------------------------------
-# POST /export/{document_id}
-# ---------------------------------------------------------------------------
-
 @router.post("/{document_id}")
 async def export_document(
     document_id: str,
-    format: Optional[str] = Query(
-        "same",
-        description=(
-            "Output format: 'same' (match original), 'docx', or 'pdf'. "
-            "PDF output requires ReportLab (pip install reportlab). "
-            "For PDFs input, 'docx' output is recommended for best fidelity."
-        ),
-    ),
-    include_untranslated: bool = Query(
-        False,
-        description="If True, untranslated segments use original source text.",
-    ),
+    format: Optional[str] = Query("same", description="Output format"),
+    include_untranslated: bool = Query(False, description="If True, untranslated segments use original source text."),
+    db: Session = Depends(get_db)
 ):
     """
     Regenerate the translated document and return it as a download.
-
-    The system:
-    1. Loads the parsed document (structure + formatting metadata).
-    2. Loads all translated segments.
-    3. Reconstructs the document, placing translated text back into the
-       original layout with preserved formatting.
-    4. Returns the file as an attachment download.
-
-    Segment priority: final_text > correction > translated_text > original text
     """
-    # Load parsed document
-    parsed_doc = load_parsed_document(document_id)
-    if parsed_doc is None:
+    doc = db.query(Document).filter(Document.id == document_id).first()
+    if not doc:
         raise HTTPException(status_code=404, detail=f"Document '{document_id}' not found.")
-
-    # Load segments
-    seg_data = load_segmented_document(document_id)
-    if seg_data is None:
+        
+    db_segments = db.query(SegmentDB).filter(SegmentDB.document_id == document_id).all()
+    if not db_segments:
         raise HTTPException(status_code=404, detail=f"Segments for '{document_id}' not found.")
 
-    segments = seg_data.get("segments", [])
-
-    # Check: are there any translated segments at all?
-    translatable = [s for s in segments if s.get("status") != "skip"]
-    translated   = [s for s in translatable if s.get("translated_text") or s.get("final_text")]
+    translatable = [s for s in db_segments if s.status != "skip"]
+    translated   = [s for s in translatable if s.translated_text or s.final_text]
 
     if not translated:
-        raise HTTPException(
-            status_code=400,
-            detail="No translated segments found. Run POST /translate first.",
-        )
+        raise HTTPException(status_code=400, detail="No translated segments found. Run POST /translate first.")
 
-    # If include_untranslated=False, warn about pending segments but proceed
-    pending = [s for s in translatable if not s.get("translated_text") and not s.get("final_text")]
+    pending = [s for s in translatable if not s.translated_text and not s.final_text]
     if pending and not include_untranslated:
-        logger.warning(
-            f"Export {document_id}: {len(pending)} untranslated segments "
-            "will use original source text."
-        )
+        logger.warning(f"Export {document_id}: {len(pending)} untranslated segments will use original source text.")
 
-    # Validate format param
     if format not in ("same", "docx", "pdf"):
-        raise HTTPException(
-            status_code=400,
-            detail=f"Invalid format '{format}'. Use: same | docx | pdf",
-        )
+        raise HTTPException(status_code=400, detail=f"Invalid format '{format}'. Use: same | docx | pdf")
 
-    # Run regeneration
+    # Reconstruct dictionary forms for regenerator
+    parsed_doc = {
+        "id": doc.id,
+        "filename": doc.filename,
+        "file_type": doc.file_type,
+        "blocks": doc.blocks,
+        "metadata": doc.metadata_json or {}
+    }
+    
+    segments_list = []
+    for s in db_segments:
+        segments_list.append({
+            "id": s.id,
+            "document_id": s.document_id,
+            "text": s.text,
+            "translated_text": s.translated_text,
+            "correction": s.correction,
+            "final_text": s.final_text,
+            "status": s.status,
+            "type": s.type,
+            "parent_id": s.parent_id,
+            "block_type": s.block_type,
+            "position": s.position,
+            "format_snapshot": s.format_snapshot,
+            "row": s.row,
+            "col": s.col,
+            "table_index": s.table_index,
+            "row_count": s.row_count,
+            "col_count": s.col_count,
+            "col_widths": s.col_widths,
+        })
+
     try:
         output_path = regenerate_document(
             document_id=document_id,
             parsed_doc=parsed_doc,
-            segments=segments,
+            segments=segments_list,
             output_format=format,
         )
     except RuntimeError as e:
@@ -149,10 +135,8 @@ async def export_document(
     if not output_path.exists():
         raise HTTPException(status_code=500, detail="Regenerated file not found on disk.")
 
-    # Determine MIME type
     suffix   = output_path.suffix.lower()
-    mime_map = {".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                ".pdf":  "application/pdf"}
+    mime_map = {".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document", ".pdf":  "application/pdf"}
     media_type = mime_map.get(suffix, "application/octet-stream")
 
     logger.info(f"Serving export: {output_path.name} ({media_type})")

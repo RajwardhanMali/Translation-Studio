@@ -66,13 +66,7 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"Encoder not pre-loaded: {e}")
 
-    # Pre-load FAISS translation memory
-    try:
-        from app.services.rag_engine import get_tm
-        get_tm()
-        logger.info("FAISS translation memory ready.")
-    except Exception as e:
-        logger.warning(f"FAISS TM not pre-loaded: {e}")
+    # Pre-load FAISS translation memory - REMOVED for Postgresql/pgvector
 
     logger.info("=== Translation Studio ready ===")
     yield

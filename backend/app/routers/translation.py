@@ -1,22 +1,17 @@
 """
 Translation router — v3.
-
-Key changes:
-  - After translation, automatically stores results in FAISS TM
-    (store_translations_batch) so the TM grows without needing human approval.
-  - Uses new translate_batch() which packs multiple segments into each LLM call.
-  - Only sentence-type segments are sent to LLM; heading/table_cell segments
-    are also translated but kept in separate pass to avoid noise.
 """
 
 import logging
 from typing import List, Optional
 from datetime import datetime
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Depends
+from sqlalchemy.orm import Session
 
+from app.database import get_db
+from app.models.domain import Document, Segment as SegmentDB
 from app.models.schemas import TranslateRequest, TranslateResponse, Segment
-from app.utils.file_handler import load_segmented_document, save_segmented_document
 from app.utils.embeddings import encode_texts
 from app.services.rag_engine import classify_segment, store_translations_batch
 from app.services.llm_service import translate_batch, get_backend_info
@@ -37,31 +32,50 @@ async def translation_info():
 
 
 @router.post("", response_model=TranslateResponse)
-async def translate_document(request: TranslateRequest):
-    """
-    Translate all (or selected) segments of a document.
-
-    Performance: segments are embedded in one batched call, then translated
-    in multi-segment LLM batches (10 per API call by default).
-    TM is automatically populated after translation — no human approval needed.
-    """
-    data = load_segmented_document(request.document_id)
-    if data is None:
+async def translate_document(request: TranslateRequest, db: Session = Depends(get_db)):
+    doc = db.query(Document).filter(Document.id == request.document_id).first()
+    if not doc:
         raise HTTPException(status_code=404, detail=f"Document '{request.document_id}' not found.")
 
-    all_segments: List[dict] = data.get("segments", [])
+    db_segments = db.query(SegmentDB).filter(SegmentDB.document_id == request.document_id).all()
+    
+    # Convert DB models to dicts for existing logic
+    all_segments = []
+    for s in db_segments:
+        all_segments.append({
+            "id": s.id,
+            "document_id": s.document_id,
+            "text": s.text,
+            "translated_text": s.translated_text,
+            "correction": s.correction,
+            "final_text": s.final_text,
+            "status": s.status,
+            "type": s.type,
+            "parent_id": s.parent_id,
+            "block_type": s.block_type,
+            "position": s.position,
+            "format_snapshot": s.format_snapshot,
+            "tm_match_type": s.tm_match_type,
+            "tm_score": s.tm_score,
+            "row": s.row,
+            "col": s.col,
+            "table_index": s.table_index,
+            "row_count": s.row_count,
+            "col_count": s.col_count,
+            "col_widths": s.col_widths,
+            "created_at": s.created_at.isoformat() if s.created_at else None,
+            "updated_at": s.updated_at.isoformat() if s.updated_at else None,
+        })
+        
     target_ids = set(request.segment_ids) if request.segment_ids else None
     effective_rules = request.style_rules or get_style_rules()
 
-    # ── Load document classification context ──────────────────────────────
-    classification = data.get("metadata", {}).get("classification", {})
+    classification = doc.metadata_json.get("classification", {}) if doc.metadata_json else {}
     document_domain = classification.get("domain")
     glossary_fragment = build_glossary_prompt_fragment(
         "", request.target_language, document_domain=document_domain
     )
 
-    # ── 0. Pre-validation (AI-powered, opt-in) ────────────────────────────
-    validation_results = []
     if request.pre_validate:
         logger.info(f"Running pre-translation AI validation for doc: {request.document_id}")
         validation_results = validate_segments(
@@ -71,12 +85,11 @@ async def translate_document(request: TranslateRequest):
             min_issue_severity="warning",
             document_context=classification,
         )
-        data["validation_results"] = validation_results
         logger.info(f"Pre-validation complete: {len(validation_results)} segments with issues")
 
-    # ── 1. Filter segments that need translation ──────────────────────────────
-    # Load the language this document was previously translated to (if any)
-    prev_language = data.get("target_language", "")
+    # Assuming prev_language was stored in document.metadata_json
+    metadata = doc.metadata_json or {}
+    prev_language = metadata.get("target_language", "")
 
     to_translate: List[dict] = []
     for seg in all_segments:
@@ -90,10 +103,6 @@ async def translate_document(request: TranslateRequest):
             seg["updated_at"] = datetime.utcnow().isoformat()
             continue
 
-        # ── Language-change detection ─────────────────────────────────────
-        # If the document was previously translated to a DIFFERENT language,
-        # clear the old translation so we go through the LLM again.
-        # We do NOT clear human corrections — those are language-agnostic edits.
         if prev_language and prev_language.lower() != request.target_language.lower():
             if seg.get("translated_text") and not seg.get("correction"):
                 seg["translated_text"] = None
@@ -102,7 +111,6 @@ async def translate_document(request: TranslateRequest):
                 seg["tm_score"]        = None
 
         tt = seg.get("translated_text", "") or ""
-        # Skip only if genuinely translated in the right language
         if tt and not tt.startswith("[") and tt.strip() != seg.get("text", "").strip():
             continue
         if not seg.get("text", "").strip():
@@ -118,16 +126,13 @@ async def translate_document(request: TranslateRequest):
             segments=[Segment(**s) for s in all_segments],
         )
 
-    # ── 2. Batch embed all source texts at once ───────────────────────────────
     sources = [s["text"].strip() for s in to_translate]
     try:
-        embeddings = encode_texts(sources)   # single batched encoder call
-        logger.info(f"Embeddings computed: {len(embeddings)} vectors")
+        embeddings = encode_texts(sources)
     except Exception as e:
         logger.error(f"Batch embedding failed: {e}")
         embeddings = None
 
-    # ── 3. TM classify each segment ───────────────────────────────────────────
     for i, seg in enumerate(to_translate):
         if embeddings is not None:
             try:
@@ -144,14 +149,12 @@ async def translate_document(request: TranslateRequest):
         seg["tm_translation"]   = tm_translation
         seg["glossary_fragment"] = glossary_fragment
 
-    # ── 4. Translate in batches ───────────────────────────────────────────────
     translate_batch(
         segments=to_translate,
         target_language=request.target_language,
         style_rules=effective_rules,
     )
 
-    # ── 5. Post-process: glossary enforcement + status update ──────────────────
     translated_count = 0
     seg_index = {s["id"]: s for s in all_segments}
 
@@ -165,9 +168,6 @@ async def translate_document(request: TranslateRequest):
             raw, seg["text"], request.target_language,
             document_domain=document_domain,
         )
-        if violations:
-            logger.info(f"Glossary: {len(violations)} fix(es) on {seg['id']}")
-
         seg_index[seg["id"]]["translated_text"] = corrected
         seg_index[seg["id"]]["status"]          = "reviewed"
         seg_index[seg["id"]]["updated_at"]      = datetime.utcnow().isoformat()
@@ -175,12 +175,23 @@ async def translate_document(request: TranslateRequest):
         seg_index[seg["id"]]["tm_score"]        = seg["tm_score"]
         translated_count += 1
 
-    # ── 6. Persist segments ───────────────────────────────────────────────────
-    data["segments"]        = list(seg_index.values())
-    data["target_language"] = request.target_language
-    save_segmented_document(request.document_id, data)
+    # Update metadata and segments back to DB
+    metadata["target_language"] = request.target_language
+    doc.metadata_json = metadata
 
-    # ── 7. Auto-populate TM (no approval needed) ──────────────────────────────
+    for db_s in db_segments:
+        updated_dict = seg_index.get(db_s.id)
+        if updated_dict:
+            db_s.translated_text = updated_dict.get("translated_text")
+            db_s.correction = updated_dict.get("correction")
+            db_s.final_text = updated_dict.get("final_text")
+            db_s.status = updated_dict.get("status")
+            db_s.tm_match_type = updated_dict.get("tm_match_type")
+            db_s.tm_score = updated_dict.get("tm_score")
+            db_s.updated_at = datetime.utcnow()
+
+    db.commit()
+
     try:
         stored = store_translations_batch(
             segments=[s for s in to_translate if not s.get("translated_text", "").startswith("[")],
@@ -188,15 +199,10 @@ async def translate_document(request: TranslateRequest):
         )
         logger.info(f"TM auto-populated: {stored} entries added.")
     except Exception as e:
-        logger.warning(f"TM auto-populate failed (non-critical): {e}")
-
-    logger.info(
-        f"Translation done: {translated_count} translated, "
-        f"{len(all_segments) - len(to_translate)} skipped."
-    )
+        logger.warning(f"TM auto-populate failed: {e}")
 
     return TranslateResponse(
         document_id=request.document_id,
         segments_translated=translated_count,
-        segments=[Segment(**s) for s in data["segments"]],
+        segments=[Segment(**s) for s in all_segments],
     )
