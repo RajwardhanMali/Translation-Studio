@@ -132,12 +132,6 @@ export default function GlossaryPage() {
     <AppShell
       title="Glossary"
       subtitle="Keep terminology and writing guidance consistent across every document review."
-      actions={
-        <Button className="rounded-2xl" onClick={() => setDialogOpen(true)}>
-          <Plus className="mr-2 h-4 w-4" />
-          Add Term
-        </Button>
-      }
     >
       <div className="space-y-6">
         <section className="hero-sheen overflow-hidden rounded-[2rem] border border-border/70">
@@ -169,6 +163,13 @@ export default function GlossaryPage() {
             </div>
           </div>
         </section>
+
+        <div className="flex justify-end">
+          <Button className="rounded-2xl" onClick={() => setDialogOpen(true)}>
+            <Plus className="mr-2 h-4 w-4" />
+            Add Term
+          </Button>
+        </div>
 
         <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_320px]">
           <div className="space-y-4">

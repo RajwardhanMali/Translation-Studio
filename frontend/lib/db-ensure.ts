@@ -34,5 +34,19 @@ export async function ensureAppTables() {
     )
   `)
 
+  await db.execute(sql`
+    CREATE TABLE IF NOT EXISTS document_share_access (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+      share_id text NOT NULL,
+      document_id text NOT NULL,
+      owner_clerk_user_id text NOT NULL,
+      recipient_clerk_user_id text NOT NULL,
+      recipient_email text NOT NULL,
+      recipient_name text,
+      accessed_at timestamptz NOT NULL DEFAULT now(),
+      updated_at timestamptz NOT NULL DEFAULT now()
+    )
+  `)
+
   ensured = true
 }

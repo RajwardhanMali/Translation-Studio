@@ -1,35 +1,18 @@
 """
-RAG + Translation Memory engine — language-aware.
+RAG + Translation Memory engine — language-aware (v4).
 
-Root cause fixed in this version:
-  LANGUAGE BLEED: classify_segment() never filtered by target_language.
-  A French translation stored for "Hello" would be returned when searching
-  for a German translation of the same text, because FAISS only scores by
-  vector similarity — it has no concept of language.
+Architecture change:
+  MULTI-INDEX TM: We now use a separate FAISS index and metadata list
+  for EACH target language.
 
-  Fix strategy:
-    The FAISS index stores ALL languages together (one index for all).
-    When searching, we retrieve the top-K nearest neighbours (K = min(50, ntotal))
-    then filter that candidate list to only entries matching target_language,
-    and return the best match from the filtered set.
-
-    Why not a separate index per language?
-      - Simpler ops (one file pair, not N)
-      - Languages share the same semantic space, so one IndexFlatIP works fine
-      - Post-filter on metadata is fast (metadata is a Python list, filtering
-        50 entries is microseconds)
-
-    Why top-K = 50?
-      - For a 1000-entry TM you might have 100 French, 100 German, etc.
-        Fetching only top-1 risks missing the best same-language match.
-        50 is a safe ceiling that makes it statistically very unlikely the
-        best same-language match falls outside the retrieved set, while
-        keeping the filter loop trivially fast.
-      - Capped at ntotal so it never over-asks.
-
-  Additional fix: store() now also checks for exact duplicate
-  (same source_text + language already in metadata) to avoid
-  the TM growing unboundedly with repeated translations.
+  This fully solves the "Language Bleed / Top-K Truncation" issue:
+    Before: A single monolithic index meant `K=50` could be filled with
+            identical source texts from 50 OTHER languages, truncating
+            the actual target language and missing the TM hit.
+    Now: When translating to French, we only ever query `tm_fr.index`.
+         It is computationally impossible to bleed languages.
+         Top-K is completely safe (K=5 is enough) because all results
+         are guaranteed to be in the requested language.
 """
 
 import logging
@@ -43,13 +26,9 @@ logger = logging.getLogger(__name__)
 
 EXACT_THRESHOLD = 0.95
 FUZZY_THRESHOLD = 0.75
-SEARCH_TOP_K    = 50      # candidates to retrieve before language filter
+SEARCH_TOP_K    = 5       # candidates to retrieve (now completely safe since it's per-language)
 
 from app.utils.file_handler import FAISS_DIR
-
-INDEX_PATH    = FAISS_DIR / "tm.index"
-METADATA_PATH = FAISS_DIR / "tm_metadata.pkl"
-
 
 def _load_faiss():
     try:
@@ -61,10 +40,13 @@ def _load_faiss():
 
 class TranslationMemory:
     def __init__(self):
-        self._faiss    = None
-        self.index     = None
-        self.metadata: List[Dict] = []
-        self._dim: Optional[int]  = None
+        self._faiss = None
+        # Maps language code -> FAISS index
+        self.indices: Dict[str, Any] = {}
+        # Maps language code -> List of metadata dicts
+        self.metadata: Dict[str, List[Dict]] = {}
+        # Maps language code -> Embedding dimension
+        self._dims: Dict[str, int] = {}
 
     @property
     def faiss(self):
@@ -72,47 +54,81 @@ class TranslationMemory:
             self._faiss = _load_faiss()
         return self._faiss
 
+    def _get_index_path(self, language: str) -> Path:
+        return FAISS_DIR / f"tm_{language.lower()}.index"
+
+    def _get_meta_path(self, language: str) -> Path:
+        return FAISS_DIR / f"tm_metadata_{language.lower()}.pkl"
+
     # ── Persistence ──────────────────────────────────────────────────────────
 
     def load(self) -> None:
-        if INDEX_PATH.exists() and METADATA_PATH.exists():
-            try:
-                self.index = self.faiss.read_index(str(INDEX_PATH))
-                with open(METADATA_PATH, "rb") as f:
-                    self.metadata = pickle.load(f)
-                self._dim = self.index.d
-                logger.info(f"TM loaded: {self.index.ntotal} entries, dim={self._dim}")
-                return
-            except Exception as e:
-                logger.error(f"TM load failed: {e} — starting fresh.")
-        self.index    = None
-        self.metadata = []
-        self._dim     = None
-        logger.info("TM initialised empty.")
+        """Load all per-language TM indices from disk."""
+        self.indices.clear()
+        self.metadata.clear()
+        self._dims.clear()
+        
+        # Look for existing tm_metadata_*.pkl files
+        meta_files = list(FAISS_DIR.glob("tm_metadata_*.pkl"))
+        
+        for meta_path in meta_files:
+            # Extract language code from filename: tm_metadata_fr.pkl -> fr
+            lang = meta_path.stem.replace("tm_metadata_", "")
+            idx_path = self._get_index_path(lang)
+            
+            if idx_path.exists():
+                try:
+                    index = self.faiss.read_index(str(idx_path))
+                    with open(meta_path, "rb") as f:
+                        meta = pickle.load(f)
+                    
+                    self.indices[lang] = index
+                    self.metadata[lang] = meta
+                    self._dims[lang] = index.d
+                    logger.info(f"TM loaded [{lang}]: {index.ntotal} entries, dim={index.d}")
+                except Exception as e:
+                    logger.error(f"TM load failed for [{lang}]: {e} — resetting this language.")
+                    
+        if not self.indices:
+            logger.info("TM initialised empty (multi-index).")
 
-    def save(self) -> None:
-        if self.index is None:
+    def save_language(self, language: str) -> None:
+        """Save a specific language's index to disk."""
+        lang = language.lower()
+        if lang not in self.indices:
             return
+            
         try:
-            self.faiss.write_index(self.index, str(INDEX_PATH))
-            with open(METADATA_PATH, "wb") as f:
-                pickle.dump(self.metadata, f)
-            logger.debug(f"TM saved: {self.index.ntotal} entries.")
+            self.faiss.write_index(self.indices[lang], str(self._get_index_path(lang)))
+            with open(self._get_meta_path(lang), "wb") as f:
+                pickle.dump(self.metadata[lang], f)
+            logger.debug(f"TM saved [{lang}]: {self.indices[lang].ntotal} entries.")
         except Exception as e:
-            logger.error(f"TM save failed: {e}")
+            logger.error(f"TM save failed for [{lang}]: {e}")
 
-    def _ensure_index(self, dim: int) -> None:
-        if self.index is not None and self._dim == dim:
+    def save_all(self) -> None:
+        """Save all loaded indices."""
+        for lang in self.indices.keys():
+            self.save_language(lang)
+
+    def _ensure_index(self, language: str, dim: int) -> None:
+        lang = language.lower()
+        if lang in self.indices and self._dims.get(lang) == dim:
             return
-        if self.index is not None and self._dim != dim:
+            
+        if lang in self.indices and self._dims.get(lang) != dim:
             logger.warning(
-                f"TM dim mismatch: index={self._dim}, encoder={dim}. "
+                f"TM dim mismatch for [{lang}]: index={self._dims.get(lang)}, encoder={dim}. "
                 "Re-initialising — existing entries lost."
             )
-            self.metadata = []
-        self._dim  = dim
-        self.index = self.faiss.IndexFlatIP(dim)
-        logger.info(f"FAISS index created (dim={dim}).")
+            self.metadata[lang] = []
+            
+        self._dims[lang]  = dim
+        self.indices[lang] = self.faiss.IndexFlatIP(dim)
+        if lang not in self.metadata:
+            self.metadata[lang] = []
+            
+        logger.info(f"FAISS index created for [{lang}] (dim={dim}).")
 
     # ── Language-aware search ─────────────────────────────────────────────────
 
@@ -123,53 +139,36 @@ class TranslationMemory:
         top_k: int = SEARCH_TOP_K,
     ) -> Tuple[Optional[Dict], float]:
         """
-        Find the best TM match for query_vec that is in target_language.
-
-        Steps:
-          1. Ask FAISS for the top_k nearest neighbours by cosine similarity.
-          2. Filter those candidates to entries where language == target_language.
-          3. Return the highest-scoring filtered candidate.
-
-        If no candidate in the target language is found within top_k results,
-        return (None, 0.0) so the caller falls through to LLM translation.
+        Find the best TM match for query_vec strictly in target_language.
+        Because queries route entirely to the language's own index, bleeding is impossible.
         """
-        if self.index is None or self.index.ntotal == 0:
+        lang = target_language.lower()
+        idx = self.indices.get(lang)
+        
+        if idx is None or idx.ntotal == 0:
             return None, 0.0
 
-        vec    = query_vec.reshape(1, -1).astype(np.float32)
-        k      = min(top_k, self.index.ntotal)
-        distances, indices = self.index.search(vec, k)
+        vec = query_vec.reshape(1, -1).astype(np.float32)
+        k   = min(top_k, idx.ntotal)
+        
+        distances, hit_indices = idx.search(vec, k)
 
         best_meta  = None
         best_score = 0.0
 
-        for idx, score in zip(indices[0], distances[0]):
-            if idx == -1:
+        # We return the top result unconditionally, because ALL results 
+        # in this index are by definition the correct language.
+        for faiss_id, score in zip(hit_indices[0], distances[0]):
+            if faiss_id == -1:
                 continue
-            meta = self.metadata[int(idx)]
-            # ── Language filter — this is the core bug fix ──────────────────
-            if meta.get("language", "").lower() != target_language.lower():
-                continue
-            # First matching entry is the best (FAISS returns sorted by score)
-            best_meta  = meta
+            
+            best_meta  = self.metadata[lang][int(faiss_id)]
             best_score = float(score)
             break
 
         return best_meta, best_score
 
-    # ── Dedup helper ──────────────────────────────────────────────────────────
-
-    def _is_duplicate(self, source_text: str, language: str) -> bool:
-        """Return True if an entry with the same source+language already exists."""
-        src_lower = source_text.strip().lower()
-        lang_lower = language.lower()
-        return any(
-            m.get("source_text", "").strip().lower() == src_lower
-            and m.get("language", "").lower() == lang_lower
-            for m in self.metadata
-        )
-
-    # ── Add (single — for approval path) ─────────────────────────────────────
+    # ── Add & Update ──────────────────────────────────────────────────────────
 
     def add_entry(
         self,
@@ -180,91 +179,82 @@ class TranslationMemory:
         segment_id: Optional[str] = None,
         document_id: Optional[str] = None,
     ) -> None:
-        if self._is_duplicate(source_text, language):
-            # Update the existing entry's target_text (human correction wins)
-            src_lower  = source_text.strip().lower()
-            lang_lower = language.lower()
-            for m in self.metadata:
-                if (
-                    m.get("source_text", "").strip().lower() == src_lower
-                    and m.get("language", "").lower() == lang_lower
-                ):
-                    m["target_text"]  = target_text
-                    m["segment_id"]   = segment_id
-                    m["document_id"]  = document_id
-                    break
-            self.save()
-            logger.debug(f"TM updated existing entry ({language}): '{source_text[:50]}'")
-            return
+        lang = language.lower()
+        src_lower = source_text.strip().lower()
+        
+        # Check if identical source already exists in this language
+        if lang in self.metadata:
+            for m in self.metadata[lang]:
+                if m.get("source_text", "").strip().lower() == src_lower:
+                    # Update existing (human correction overwrites)
+                    m["target_text"] = target_text
+                    m["segment_id"]  = segment_id
+                    m["document_id"] = document_id
+                    self.save_language(lang)
+                    logger.debug(f"TM updated existing entry [{lang}]: '{source_text[:50]}'")
+                    return
 
+        # New entry
         vec = embedding.reshape(1, -1).astype(np.float32)
-        self._ensure_index(vec.shape[1])
-        self.index.add(vec)
-        self.metadata.append({
+        self._ensure_index(lang, vec.shape[1])
+        
+        self.indices[lang].add(vec)
+        self.metadata[lang].append({
             "source_text":  source_text,
             "target_text":  target_text,
             "language":     language,
             "segment_id":   segment_id,
             "document_id":  document_id,
         })
-        self.save()
-        logger.debug(f"TM added ({language}): '{source_text[:50]}'")
-
-    # ── Add (batch — for post-translation auto-populate) ─────────────────────
+        self.save_language(lang)
+        logger.debug(f"TM added [{lang}]: '{source_text[:50]}'")
 
     def add_entries_batch(self, entries: List[Dict]) -> int:
         """
-        Add multiple entries, skipping duplicates (same source_text + language).
-        Saves once after all entries are added.
+        Add multiple entries at once, routing them to their respective language indices.
+        Saves modified indices afterward.
         """
         if not entries:
             return 0
 
-        new_entries  = []
-        skipped      = 0
-        update_count = 0
+        added_count = 0
+        langs_modified = set()
 
         for e in entries:
-            src  = e["source_text"]
-            lang = e["language"]
-            if self._is_duplicate(src, lang):
-                # Only update if this is a human correction (has correction field)
-                # Auto-translations don't overwrite existing entries
-                if e.get("is_correction"):
-                    for m in self.metadata:
-                        if (
-                            m.get("source_text", "").strip().lower() == src.strip().lower()
-                            and m.get("language", "").lower() == lang.lower()
-                        ):
+            lang = e["language"].lower()
+            src_lower = e["source_text"].strip().lower()
+            
+            is_dup = False
+            # Check dup
+            if lang in self.metadata:
+                for m in self.metadata[lang]:
+                    if m.get("source_text", "").strip().lower() == src_lower:
+                        is_dup = True
+                        if e.get("is_correction"):
+                            # Update existing
                             m["target_text"] = e["target_text"]
-                            update_count += 1
-                            break
-                else:
-                    skipped += 1
-                continue
-            new_entries.append(e)
-
-        if new_entries:
-            vecs = np.stack(
-                [e["embedding"].reshape(-1) for e in new_entries]
-            ).astype(np.float32)
-            self._ensure_index(vecs.shape[1])
-            self.index.add(vecs)
-            for e in new_entries:
-                self.metadata.append({
+                            langs_modified.add(lang)
+                        break
+            
+            if not is_dup:
+                vec = e["embedding"].reshape(1, -1).astype(np.float32)
+                self._ensure_index(lang, vec.shape[1])
+                self.indices[lang].add(vec)
+                self.metadata[lang].append({
                     "source_text":  e["source_text"],
                     "target_text":  e["target_text"],
                     "language":     e["language"],
                     "segment_id":   e.get("segment_id"),
                     "document_id":  e.get("document_id"),
                 })
+                langs_modified.add(lang)
+                added_count += 1
 
-        self.save()
-        logger.info(
-            f"TM batch: {len(new_entries)} added, {skipped} skipped (dup), "
-            f"{update_count} updated. Total: {self.index.ntotal if self.index else 0}"
-        )
-        return len(new_entries)
+        for lang in langs_modified:
+            self.save_language(lang)
+
+        logger.info(f"TM batch: {added_count} new entries added across {len(langs_modified)} languages.")
+        return added_count
 
 
 # ── Singleton ─────────────────────────────────────────────────────────────────
@@ -285,7 +275,7 @@ def get_tm() -> TranslationMemory:
 def classify_segment(
     source_text: str,
     embedding: np.ndarray,
-    target_language: str,          # ← required now, no default
+    target_language: str,          
 ) -> Tuple[str, Optional[str], float]:
     """
     Classify a segment against the TM for a specific target language.

@@ -25,13 +25,41 @@ import re
 import time
 import json
 import logging
+from pathlib import Path
 from typing import Optional, List, Dict, Any
 
-from dotenv import load_dotenv
-
-load_dotenv()
-
 logger = logging.getLogger(__name__)
+
+
+def _load_environment() -> None:
+    """
+    Load environment variables from `.env` when available.
+
+    This keeps the LLM layer importable even if `python-dotenv` is missing in
+    the active interpreter.
+    """
+    try:
+        from dotenv import load_dotenv  # type: ignore
+    except ImportError:
+        env_path = Path(__file__).resolve().parents[2] / ".env"
+        if not env_path.exists():
+            return
+
+        for raw_line in env_path.read_text(encoding="utf-8").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+
+            key, value = line.split("=", 1)
+            key = key.strip()
+            value = value.strip().strip('"').strip("'")
+            os.environ.setdefault(key, value)
+        return
+
+    load_dotenv()
+
+
+_load_environment()
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
@@ -60,9 +88,14 @@ def _get_groq():
             raise RuntimeError(
                 "GROQ_API_KEY is not set. Add it to your .env file."
             )
-        from groq import Groq
-        _groq_client = Groq(api_key=GROQ_API_KEY)
-        logger.info(f"Groq ready (model: {GROQ_MODEL})")
+        try:
+            from groq import Groq
+        except ImportError:
+            logger.info("Groq SDK not installed; using direct HTTP fallback.")
+            _groq_client = False
+        else:
+            _groq_client = Groq(api_key=GROQ_API_KEY)
+            logger.info(f"Groq ready (model: {GROQ_MODEL})")
     return _groq_client
 
 
@@ -73,16 +106,46 @@ def _call_groq(system: str, user: str, max_tokens: int = 2048) -> str:
     delay  = RETRY_BASE_DELAY
     for attempt in range(1, MAX_RETRIES + 1):
         try:
-            resp = client.chat.completions.create(
-                model=GROQ_MODEL,
-                messages=[
+            if client:
+                resp = client.chat.completions.create(
+                    model=GROQ_MODEL,
+                    messages=[
+                        {"role": "system", "content": system},
+                        {"role": "user",   "content": user},
+                    ],
+                    max_tokens=max_tokens,
+                    temperature=0.1,
+                )
+                return (resp.choices[0].message.content or "").strip()
+
+            import urllib.request
+
+            payload = json.dumps({
+                "model": GROQ_MODEL,
+                "messages": [
                     {"role": "system", "content": system},
-                    {"role": "user",   "content": user},
+                    {"role": "user", "content": user},
                 ],
-                max_tokens=max_tokens,
-                temperature=0.1,
+                "max_tokens": max_tokens,
+                "temperature": 0.1,
+            }).encode("utf-8")
+
+            req = urllib.request.Request(
+                "https://api.groq.com/openai/v1/chat/completions",
+                data=payload,
+                headers={
+                    "Authorization": f"Bearer {GROQ_API_KEY}",
+                    "Content-Type": "application/json",
+                },
+                method="POST",
             )
-            return (resp.choices[0].message.content or "").strip()
+
+            with urllib.request.urlopen(req, timeout=180) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+                choices = data.get("choices") or []
+                if not choices:
+                    raise RuntimeError("Groq response did not include any choices.")
+                return (choices[0].get("message", {}).get("content") or "").strip()
         except Exception as e:
             err = str(e).lower()
             if ("rate" in err or "429" in err or "limit" in err) and attempt < MAX_RETRIES:
