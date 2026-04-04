@@ -100,18 +100,16 @@ class ValidationIssue(BaseModel):
     """A single validation issue found in source text."""
     segment_id: Optional[str] = None
     issue_type: Literal[
-        "spelling", "double_space", "punctuation_spacing",
-        "consistency", "grammar", "style",
-        "space_before_punct", "missing_space_after_punct", "repeated_punctuation",
-        "clarity", "wrong_word", "punctuation"
+        "spelling", "grammar", "consistency", "punctuation",
+        "formatting", "wrong_word", "clarity", "style"
     ]
     issue: str
     suggestion: str
     severity: Literal["error", "warning", "info"]
-    offset: Optional[int] = None      # character offset in text
-    length: Optional[int] = None      # length of problematic span
-    confidence: Optional[float] = None  # 0.0–1.0, set by AI agent
-    source: Optional[str] = None        # "deterministic" | "ai" | "merged"
+    offset: Optional[int] = None
+    length: Optional[int] = None
+    confidence: Optional[float] = None
+    source: Optional[str] = None
 
 
 class ValidationResult(BaseModel):
@@ -128,9 +126,45 @@ class ValidationResult(BaseModel):
 class ValidateRequest(BaseModel):
     """Request body for validation endpoint."""
     document_id: Optional[str] = None
-    text: Optional[str] = None          # validate arbitrary text if no doc_id
+    text: Optional[str] = None
     auto_fix: bool = False
-    enable_ai: bool = False             # enable LLM-powered context-aware validation
+    enable_ai: bool = False
+
+
+class ApplyFixesRequest(BaseModel):
+    """Request to auto-apply AI-suggested fixes to segments."""
+    document_id: str
+    segment_ids: Optional[List[str]] = None    # if None, fix all segments
+
+
+class SegmentFix(BaseModel):
+    """Result of an auto-applied fix on a single segment."""
+    segment_id: str
+    original: str
+    fixed: str
+    issues_fixed: int
+
+
+class ApplyFixesResponse(BaseModel):
+    """Response from auto-apply endpoint."""
+    document_id: str
+    fixed_count: int
+    fixes: List[SegmentFix]
+
+
+class EditSegmentRequest(BaseModel):
+    """Request to manually edit a segment's source text."""
+    document_id: str
+    segment_id: str
+    new_text: str
+
+
+class EditSegmentResponse(BaseModel):
+    """Response from segment edit endpoint."""
+    segment_id: str
+    old_text: str
+    new_text: str
+    status: str
 
 
 # ---------------------------------------------------------------------------

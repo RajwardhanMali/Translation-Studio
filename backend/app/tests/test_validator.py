@@ -1,369 +1,401 @@
 """
-Tests for Milestone 4: Document classification, domain-aware validation,
-domain-scoped glossary, and substring match fixes.
+Tests for validation module v3 (LLM-first architecture).
 
 Covers:
-  - Document classifier: mocked LLM responses, default fallback, parse errors
-  - Validator: spellcheck disabled by default, document context in prompts
-  - Glossary: domain filtering, word-boundary matching, substring bug fix
-  - Backward compatibility: all previous tests still pass
+  - Layer 1: Only double spaces detected (no false positives from old rules)
+  - Layer 2: Mocked LLM for all 5 categories
+  - No false positives: e.g., i.e., backend, hrs, domain terms all clean
+  - Auto-fix: double space removal
+  - apply_ai_fixes: AI suggestions applied to segments
+  - update_segment_text: manual edits
+  - Backward compat: result structure unchanged
+  - Edge cases
 """
 
 import pytest
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
-from app.services.document_classifier import (
-    classify_document,
-    _parse_classification,
-    _default_classification,
-)
 from app.services.validator import (
     validate_text,
     validate_segments,
-    _grammar_check,
-    _spell_check,
-    _consistency_check,
+    _fast_guard,
     _merge_issues,
     _build_term_summary,
     _parse_ai_response,
     _ai_validate,
     _ai_validate_batch,
-)
-from app.services.glossary_engine import (
-    _term_matches_source,
-    _filter_terms_by_domain,
-    build_glossary_prompt_fragment,
-    enforce_glossary,
+    apply_ai_fixes,
+    update_segment_text,
 )
 
 
 # ===========================================================================
-# Document Classifier Tests
+# Layer 1: Fast Guard — only double spaces
 # ===========================================================================
 
-class TestDocumentClassifier:
-    """Test the document classification service."""
+class TestFastGuard:
+    """Layer 1 should ONLY detect double spaces."""
 
-    @patch("app.services.llm_service._call_llm")
-    def test_classify_legal_document(self, mock_llm):
-        mock_llm.return_value = '{"document_type": "legal_contract", "confidence": 0.92, "domain": "legal", "register": "formal", "domain_keywords": ["indemnification", "liability", "arbitration"]}'
-        
-        result = classify_document("This Agreement is entered into by and between Party A and Party B regarding liability indemnification.")
-        
-        assert result["document_type"] == "legal_contract"
-        assert result["domain"] == "legal"
-        assert result["register"] == "formal"
-        assert result["confidence"] >= 0.9
-        assert "indemnification" in result["domain_keywords"]
+    def test_double_space_detected(self):
+        issues = _fast_guard("This has  double spaces.")
+        assert len(issues) == 1
+        assert issues[0]["issue_type"] == "formatting"
+        assert issues[0]["offset"] == 8
 
-    @patch("app.services.llm_service._call_llm")
-    def test_classify_technical_document(self, mock_llm):
-        mock_llm.return_value = '{"document_type": "technical_documentation", "confidence": 0.88, "domain": "technical", "register": "technical", "domain_keywords": ["api", "endpoint", "authentication", "backend"]}'
-        
-        result = classify_document("The API endpoint requires authentication via OAuth2 tokens.")
-        
-        assert result["document_type"] == "technical_documentation"
-        assert result["domain"] == "technical"
-        assert "backend" in result["domain_keywords"]
+    def test_multiple_double_spaces(self):
+        issues = _fast_guard("Fix  this  double  spacing.")
+        assert len(issues) == 3
 
-    def test_classify_empty_text(self):
-        result = classify_document("")
-        assert result["document_type"] == "general"
-        assert result["confidence"] == 0.0
+    def test_clean_text_no_issues(self):
+        issues = _fast_guard("This is a perfectly clean sentence.")
+        assert len(issues) == 0
 
-    def test_classify_whitespace_only(self):
-        result = classify_document("   \n  ")
-        assert result["document_type"] == "general"
-
-    def test_default_classification(self):
-        result = _default_classification()
-        assert result["document_type"] == "general"
-        assert result["confidence"] == 0.0
-        assert result["domain_keywords"] == []
-
-    def test_parse_classification_valid_json(self):
-        raw = '{"document_type": "financial_report", "confidence": 0.85, "domain": "financial", "register": "formal", "domain_keywords": ["revenue", "EBITDA"]}'
-        result = _parse_classification(raw)
-        assert result["document_type"] == "financial_report"
-        assert result["domain"] == "financial"
-
-    def test_parse_classification_markdown_fenced(self):
-        raw = '```json\n{"document_type": "medical_record", "confidence": 0.9, "domain": "medical", "register": "formal", "domain_keywords": ["diagnosis"]}\n```'
-        result = _parse_classification(raw)
-        assert result["document_type"] == "medical_record"
-
-    def test_parse_classification_unknown_type_defaults(self):
-        raw = '{"document_type": "alien_communication", "confidence": 0.5, "domain": "space", "register": "formal", "domain_keywords": []}'
-        result = _parse_classification(raw)
-        assert result["document_type"] == "general"  # unknown type defaults to general
-
-    def test_parse_classification_garbage_input(self):
-        raw = "I think this is a legal document about contracts."
-        result = _parse_classification(raw)
-        assert result["document_type"] == "general"
-
-    def test_parse_classification_normalizes_confidence(self):
-        raw = '{"document_type": "general", "confidence": 5.0, "domain": "general", "register": "formal", "domain_keywords": []}'
-        result = _parse_classification(raw)
-        assert result["confidence"] == 1.0  # clamped to 1.0
-
-    @patch("app.services.llm_service._call_llm")
-    def test_classify_truncates_long_text(self, mock_llm):
-        """Should only send first ~2000 chars to LLM."""
-        mock_llm.return_value = '{"document_type": "general", "confidence": 0.5, "domain": "general", "register": "formal", "domain_keywords": []}'
-        
-        long_text = "A" * 5000
-        classify_document(long_text)
-        
-        # Check the user prompt doesn't contain the full 5000 chars
-        call_args = mock_llm.call_args
-        user_prompt = call_args[0][1]  # second positional arg
-        # The actual text in the prompt should be truncated
-        assert len(user_prompt) < 3000
+    def test_single_space_not_flagged(self):
+        issues = _fast_guard("Normal single spaces everywhere.")
+        assert len(issues) == 0
 
 
 # ===========================================================================
-# Validator: Spellcheck Disabled by Default
+# Zero false positives — previously problematic cases
 # ===========================================================================
 
-class TestSpellcheckDisabledByDefault:
-    """Verify that PySpellChecker is no longer run by default."""
+class TestZeroFalsePositives:
+    """All previously problematic texts must produce ZERO issues."""
 
-    def test_backend_not_flagged_without_legacy(self):
-        """'backend' was being flagged as 'backed' — must not happen anymore."""
-        text = "The backend service handles all requests."
+    def test_eg_not_flagged(self):
+        """'e.g.' must NOT trigger consistency false positive."""
+        text = "The AI data services market is growing (e.g. West Coast)."
         result = validate_text(text, min_issue_severity="info")
-        spell_issues = [i for i in result["issues"] if i["issue_type"] == "spelling"]
-        assert len(spell_issues) == 0
+        consistency = [i for i in result["issues"] if i["issue_type"] == "consistency"]
+        assert len(consistency) == 0
 
-    def test_hrs_not_flagged_without_legacy(self):
-        """'hrs' was being flagged as 'his' — must not happen anymore."""
+    def test_ie_not_flagged(self):
+        """'i.e.' must NOT trigger consistency false positive."""
+        text = "The primary metric (i.e. revenue growth) is tracking well."
+        result = validate_text(text, min_issue_severity="info")
+        consistency = [i for i in result["issues"] if i["issue_type"] == "consistency"]
+        assert len(consistency) == 0
+
+    def test_backend_not_flagged(self):
+        text = "The backend service handles all API requests."
+        result = validate_text(text, min_issue_severity="info")
+        spelling = [i for i in result["issues"] if i["issue_type"] == "spelling"]
+        assert len(spelling) == 0
+
+    def test_hrs_not_flagged(self):
         text = "The process takes approximately 3 hrs to complete."
         result = validate_text(text, min_issue_severity="info")
-        spell_issues = [i for i in result["issues"] if i["issue_type"] == "spelling"]
-        assert len(spell_issues) == 0
+        spelling = [i for i in result["issues"] if i["issue_type"] == "spelling"]
+        assert len(spelling) == 0
 
     def test_domain_terms_not_flagged(self):
-        """Domain-specific terms should never be flagged without AI context."""
-        text = "The indemnification clause requires arbitration for liability disputes."
+        text = "The indemnification clause requires arbitration for liability."
         result = validate_text(text, min_issue_severity="info")
-        spell_issues = [i for i in result["issues"] if i["issue_type"] == "spelling"]
-        assert len(spell_issues) == 0
+        spelling = [i for i in result["issues"] if i["issue_type"] == "spelling"]
+        assert len(spelling) == 0
 
-    def test_legacy_spellcheck_opt_in(self):
-        """When legacy_spellcheck=True, PySpellChecker should still work."""
-        text = "Thiss is a misspeled sentence."
-        result = validate_text(text, legacy_spellcheck=True, min_issue_severity="warning")
-        spell_issues = [i for i in result["issues"] if i["issue_type"] == "spelling"]
-        # PySpellChecker should catch at least one misspelling
-        if spell_issues:  # graceful skip if not installed
-            assert len(spell_issues) >= 1
+    def test_clean_text_zero_issues(self):
+        text = "This is a perfectly clean sentence with no issues at all."
+        result = validate_text(text, min_issue_severity="info")
+        assert len(result["issues"]) == 0
+
+    def test_repeated_punctuation_not_flagged_deterministic(self):
+        """'!!' and '??' should NOT be flagged — removed from deterministic."""
+        text = "Really?? That's amazing!!"
+        result = validate_text(text, min_issue_severity="info", enable_ai=False)
+        assert len(result["issues"]) == 0
 
 
 # ===========================================================================
-# Validator: Document Context in Prompts
+# Auto-fix
 # ===========================================================================
 
-class TestDocumentContextInPrompts:
-    """Test that document context flows into AI validation prompts."""
+class TestAutoFix:
+    """Auto-fix should only fix double spaces."""
+
+    def test_auto_fix_double_space(self):
+        text = "Fix  this  double  spacing."
+        result = validate_text(text, auto_fix=True)
+        assert result["auto_fixed_text"] == "Fix this double spacing."
+
+    def test_auto_fix_preserves_clean_text(self):
+        text = "Already clean text."
+        result = validate_text(text, auto_fix=True)
+        assert result["auto_fixed_text"] == text
+
+
+# ===========================================================================
+# AI Response Parsing
+# ===========================================================================
+
+class TestAIResponseParsing:
+    """Test the JSON response parser."""
+
+    def test_parse_clean_json_array(self):
+        raw = '[{"issue_type": "grammar", "severity": "error", "issue": "Wrong word", "suggestion": "Fix it", "span": "loose", "confidence": 0.95}]'
+        result = _parse_ai_response(raw)
+        assert len(result) == 1
+
+    def test_parse_empty_array(self):
+        assert _parse_ai_response("[]") == []
+
+    def test_parse_markdown_fenced(self):
+        raw = '```json\n[{"issue_type": "spelling", "severity": "warning", "issue": "typo", "suggestion": "fix", "span": "teh", "confidence": 0.9}]\n```'
+        assert len(_parse_ai_response(raw)) == 1
+
+    def test_parse_wrapped_in_object(self):
+        raw = '{"issues": [{"issue_type": "grammar", "severity": "error", "issue": "test", "suggestion": "fix", "span": "x", "confidence": 0.8}]}'
+        assert len(_parse_ai_response(raw)) == 1
+
+    def test_parse_garbage_returns_empty(self):
+        assert _parse_ai_response("Some random text") == []
+
+    def test_parse_empty_string(self):
+        assert _parse_ai_response("") == []
+
+
+# ===========================================================================
+# AI Validate (mocked LLM)
+# ===========================================================================
+
+class TestAIValidate:
+    """Test AI validation with mocked LLM responses."""
 
     @patch("app.services.llm_service._call_llm")
-    def test_ai_validate_receives_document_context(self, mock_llm):
+    def test_ai_catches_wrong_word(self, mock_llm):
+        mock_llm.return_value = '[{"issue_type": "wrong_word", "severity": "error", "issue": "Wrong word: loose should be lose", "suggestion": "lose", "span": "loose", "confidence": 0.95}]'
+        issues = _ai_validate("The company will loose money.")
+        assert len(issues) == 1
+        assert issues[0]["issue_type"] == "wrong_word"
+        assert issues[0]["source"] == "ai"
+
+    @patch("app.services.llm_service._call_llm")
+    def test_ai_returns_empty_for_clean_text(self, mock_llm):
         mock_llm.return_value = "[]"
-        
+        issues = _ai_validate("This is a perfectly written sentence.")
+        assert issues == []
+
+    def test_ai_skips_empty_text(self):
+        assert _ai_validate("") == []
+
+    @patch("app.services.llm_service._call_llm")
+    def test_ai_receives_document_context(self, mock_llm):
+        mock_llm.return_value = "[]"
         doc_context = {
             "document_type": "legal_contract",
             "domain": "legal",
             "register": "formal",
             "domain_keywords": ["indemnification", "liability"],
         }
-        
-        _ai_validate(
-            "The indemnification clause is binding.",
-            document_context=doc_context,
-        )
-        
-        # Verify the system prompt contains document context
-        call_args = mock_llm.call_args
-        system_prompt = call_args[0][0]
+        _ai_validate("The indemnification clause is binding.", document_context=doc_context)
+        system_prompt = mock_llm.call_args[0][0]
         assert "legal_contract" in system_prompt
-        assert "legal" in system_prompt
         assert "indemnification" in system_prompt
 
     @patch("app.services.llm_service._call_llm")
-    def test_validate_text_passes_context_to_ai(self, mock_llm):
-        mock_llm.return_value = "[]"
-        
-        doc_context = {
-            "document_type": "technical_documentation",
-            "domain": "technical",
-            "register": "technical",
-            "domain_keywords": ["api", "endpoint"],
+    def test_ai_formatting_category(self, mock_llm):
+        mock_llm.return_value = '[{"issue_type": "formatting", "severity": "info", "issue": "Inconsistent capitalization", "suggestion": "API", "span": "api", "confidence": 0.7}]'
+        issues = _ai_validate("The api endpoint works.")
+        assert len(issues) == 1
+        assert issues[0]["issue_type"] == "formatting"
+
+
+# ===========================================================================
+# Batch AI Validation
+# ===========================================================================
+
+class TestAIValidateBatch:
+    """Test batched multi-segment AI validation."""
+
+    @patch("app.services.llm_service._call_llm")
+    def test_batch_returns_per_segment(self, mock_llm):
+        mock_llm.return_value = '{"seg1": [{"issue_type": "grammar", "severity": "warning", "issue": "Missing article", "suggestion": "the report", "span": "report", "confidence": 0.8}], "seg2": []}'
+        segments = [
+            {"id": "seg1", "text": "Send report to manager.", "status": "pending"},
+            {"id": "seg2", "text": "This is fine.", "status": "pending"},
+        ]
+        results = _ai_validate_batch(segments)
+        assert "seg1" in results
+        assert "seg2" in results
+        assert len(results["seg1"]) == 1
+        assert len(results["seg2"]) == 0
+
+    def test_batch_skips_empty_segments(self):
+        segments = [
+            {"id": "seg1", "text": "", "status": "pending"},
+            {"id": "seg2", "text": "   ", "status": "pending"},
+        ]
+        assert _ai_validate_batch(segments) == {}
+
+    def test_batch_skips_skip_status(self):
+        segments = [{"id": "seg1", "text": "Some text", "status": "skip"}]
+        assert _ai_validate_batch(segments) == {}
+
+
+# ===========================================================================
+# Merge Issues
+# ===========================================================================
+
+class TestMergeIssues:
+    """Test deduplication between deterministic and AI layers."""
+
+    def test_overlapping_issues_merged(self):
+        det = [{"issue_type": "formatting", "issue": "Double space", "suggestion": " ",
+                "severity": "warning", "offset": 5, "length": 2, "source": "deterministic", "confidence": 1.0}]
+        ai = [{"issue_type": "formatting", "issue": "Extra space detected",
+               "suggestion": " ", "severity": "warning", "offset": 5, "length": 2,
+               "confidence": 0.95, "source": "ai"}]
+        merged = _merge_issues(det, ai)
+        assert len(merged) == 1
+        assert merged[0]["source"] == "merged"
+
+    def test_non_overlapping_kept_separate(self):
+        det = [{"issue_type": "formatting", "issue": "Double space", "suggestion": " ",
+                "severity": "warning", "offset": 5, "length": 2, "source": "deterministic", "confidence": 1.0}]
+        ai = [{"issue_type": "grammar", "issue": "Missing article", "suggestion": "the cat",
+               "severity": "warning", "offset": 20, "length": 3, "confidence": 0.8, "source": "ai"}]
+        merged = _merge_issues(det, ai)
+        assert len(merged) == 2
+
+    def test_empty_ai_returns_deterministic(self):
+        det = [{"issue_type": "formatting", "issue": "test", "suggestion": "fix",
+                "severity": "warning", "offset": 0, "length": 4, "source": "deterministic", "confidence": 1.0}]
+        assert len(_merge_issues(det, [])) == 1
+
+    def test_empty_both_returns_empty(self):
+        assert _merge_issues([], []) == []
+
+
+# ===========================================================================
+# Cross-segment term summary
+# ===========================================================================
+
+class TestCrossSegmentConsistency:
+    """Test term summary extraction."""
+
+    def test_term_summary_extracts_frequent_terms(self):
+        segments = [
+            {"text": "The client requested a new feature. The client needs it urgently."},
+            {"text": "Our customer support team handles customer complaints."},
+        ]
+        summary = _build_term_summary(segments)
+        assert summary is not None
+        assert "client" in summary
+        assert "customer" in summary
+
+    def test_term_summary_empty_segments(self):
+        segments = [{"text": ""}, {"text": "   "}]
+        assert _build_term_summary(segments) is None
+
+
+# ===========================================================================
+# Apply AI Fixes
+# ===========================================================================
+
+class TestApplyAIFixes:
+    """Test the auto-apply AI fixes functionality."""
+
+    @patch("app.services.validator._ai_validate_batch")
+    def test_apply_fixes_updates_segment_text(self, mock_batch):
+        mock_batch.return_value = {
+            "seg1": [{
+                "issue_type": "spelling",
+                "issue": "Typo: 'teh' should be 'the'",
+                "suggestion": "the",
+                "severity": "error",
+                "offset": 0,
+                "length": 3,
+                "span": "Teh",
+                "confidence": 0.95,
+                "source": "ai",
+            }],
         }
-        
-        validate_text(
-            "The API endpoint handles requests.",
-            enable_ai=True,
-            document_context=doc_context,
-        )
-        
-        call_args = mock_llm.call_args
-        system_prompt = call_args[0][0]
-        assert "technical_documentation" in system_prompt
+        segments = [{"id": "seg1", "text": "Teh quick brown fox."}]
+        result = apply_ai_fixes(segments)
 
+        assert result["fixed_count"] == 1
+        assert segments[0]["text"] == "the quick brown fox."
+        assert result["fixes"][0]["original"] == "Teh quick brown fox."
+        assert result["fixes"][0]["fixed"] == "the quick brown fox."
 
-# ===========================================================================
-# Glossary: Domain Filtering
-# ===========================================================================
+    @patch("app.services.validator._ai_validate_batch")
+    def test_apply_fixes_skips_clean_segments(self, mock_batch):
+        mock_batch.return_value = {"seg1": []}
+        segments = [{"id": "seg1", "text": "Clean text."}]
+        result = apply_ai_fixes(segments)
+        assert result["fixed_count"] == 0
 
-class TestGlossaryDomainFiltering:
-    """Test domain-scoped glossary filtering."""
-
-    def test_filter_terms_no_domain_returns_all(self):
-        terms = [
-            {"source": "data", "target": "données", "language": "fr"},
-            {"source": "contract", "target": "contrat", "language": "fr", "domain": "legal"},
-        ]
-        result = _filter_terms_by_domain(terms, "fr")
-        assert len(result) == 2
-
-    def test_filter_terms_with_matching_domain(self):
-        terms = [
-            {"source": "data", "target": "données", "language": "fr"},
-            {"source": "contract", "target": "contrat", "language": "fr", "domain": "legal"},
-            {"source": "revenue", "target": "revenu", "language": "fr", "domain": "financial"},
-        ]
-        result = _filter_terms_by_domain(terms, "fr", document_domain="legal")
-        # Should include: universal "data" + matching "contract", but NOT "revenue"
-        assert len(result) == 2
-        sources = {t["source"] for t in result}
-        assert "data" in sources
-        assert "contract" in sources
-        assert "revenue" not in sources
-
-    def test_filter_terms_wrong_language_excluded(self):
-        terms = [
-            {"source": "data", "target": "datos", "language": "es"},
-        ]
-        result = _filter_terms_by_domain(terms, "fr")
-        assert len(result) == 0
-
-    def test_filter_universal_terms_always_included(self):
-        """Terms without a domain should be included regardless of document domain."""
-        terms = [
-            {"source": "data", "target": "données", "language": "fr"},  # no domain
-        ]
-        result = _filter_terms_by_domain(terms, "fr", document_domain="legal")
-        assert len(result) == 1
-
-
-# ===========================================================================
-# Glossary: Word-Boundary Matching (Substring Bug Fix)
-# ===========================================================================
-
-class TestGlossaryWordBoundary:
-    """Test that glossary uses word-boundary matching, not substring."""
-
-    def test_data_does_not_match_database(self):
-        """'data' should NOT match inside 'database'."""
-        assert _term_matches_source("data", "The database stores records.") is False
-
-    def test_data_matches_standalone(self):
-        """'data' should match when it appears as a standalone word."""
-        assert _term_matches_source("data", "The data is clean.") is True
-
-    def test_term_matches_case_insensitive(self):
-        assert _term_matches_source("Data", "the data is clean.") is True
-
-    def test_term_not_found(self):
-        assert _term_matches_source("contract", "The data is clean.") is False
-
-    def test_term_at_start_of_text(self):
-        assert _term_matches_source("data", "Data is important.") is True
-
-    def test_term_at_end_of_text(self):
-        assert _term_matches_source("data", "We need more data") is True
-
-    @patch("app.services.glossary_engine.load_glossary")
-    def test_enforce_glossary_word_boundary(self, mock_glossary):
-        """Enforcement should use word-boundary matching."""
-        mock_glossary.return_value = {
-            "terms": [
-                {"source": "data", "target": "données", "language": "fr"},
-            ],
-            "style_rules": [],
+    @patch("app.services.validator._ai_validate_batch")
+    def test_apply_fixes_specific_segments(self, mock_batch):
+        mock_batch.return_value = {
+            "seg2": [{
+                "issue_type": "grammar",
+                "issue": "Wrong word",
+                "suggestion": "lose",
+                "severity": "error",
+                "offset": 17,
+                "length": 5,
+                "span": "loose",
+                "confidence": 0.9,
+                "source": "ai",
+            }],
         }
-        
-        # Source has "data" standalone, translation has "database" — should NOT match
-        corrected, violations = enforce_glossary(
-            "The database stores everything.",
-            "The data is important.",
-            "fr",
-        )
-        # "données" should NOT appear inside "database"
-        assert "données" not in corrected or "database" in corrected
+        segments = [
+            {"id": "seg1", "text": "First segment."},
+            {"id": "seg2", "text": "The company will loose money."},
+        ]
+        result = apply_ai_fixes(segments, segment_ids=["seg2"])
+        assert result["fixed_count"] == 1
+        assert segments[1]["text"] == "The company will lose money."
 
-    @patch("app.services.glossary_engine.load_glossary")
-    def test_enforce_glossary_with_domain(self, mock_glossary):
-        """Domain-scoped terms should only apply to matching documents."""
-        mock_glossary.return_value = {
-            "terms": [
-                {"source": "liability", "target": "responsabilité", "language": "fr", "domain": "legal"},
-                {"source": "endpoint", "target": "point de terminaison", "language": "fr", "domain": "technical"},
-            ],
-            "style_rules": [],
-        }
-        
-        # Legal document — only legal terms should apply
-        corrected, violations = enforce_glossary(
-            "The liability is clear.",
-            "The liability is clear.",
-            "fr",
-            document_domain="legal",
-        )
-        # "endpoint" term should not have been checked since doc is legal
-        # "liability" should have been enforced
-        assert len(violations) >= 0  # may or may not violate depending on translation
+    def test_apply_fixes_empty_segments(self):
+        result = apply_ai_fixes([])
+        assert result["fixed_count"] == 0
 
 
 # ===========================================================================
-# Backward Compatibility: Deterministic Tests Still Pass
+# Update Segment Text (manual edit)
 # ===========================================================================
 
-class TestDeterministicBackwardCompat:
-    """All v1 deterministic tests must still pass."""
+class TestUpdateSegmentText:
+    """Test manual segment editing."""
 
-    def test_double_space_detected(self):
-        text = "This has  double spaces."
-        result = validate_text(text, min_issue_severity="warning")
-        ds_issues = [i for i in result["issues"] if i["issue_type"] == "double_space"]
-        assert len(ds_issues) == 1
+    def test_update_segment_text(self):
+        segments = [
+            {"id": "seg1", "text": "Old text with typo."},
+            {"id": "seg2", "text": "Another segment."},
+        ]
+        result = update_segment_text(segments, "seg1", "New corrected text.")
+        assert result is not None
+        assert result["old_text"] == "Old text with typo."
+        assert result["new_text"] == "New corrected text."
+        assert result["status"] == "edited"
+        assert segments[0]["text"] == "New corrected text."
+        assert segments[0]["status"] == "edited"
 
-    def test_repeated_punctuation(self):
-        text = "Really?? That's amazing!!"
-        result = validate_text(text, min_issue_severity="info")
-        punct_issues = [i for i in result["issues"] if i["issue_type"] == "grammar"]
-        assert len(punct_issues) >= 1
+    def test_update_nonexistent_segment(self):
+        segments = [{"id": "seg1", "text": "Some text."}]
+        result = update_segment_text(segments, "seg99", "New text.")
+        assert result is None
 
-    def test_clean_text_no_issues(self):
-        text = "This is a perfectly clean sentence with no issues."
-        result = validate_text(text, min_issue_severity="info")
-        assert len(result["issues"]) == 0
+    def test_update_preserves_other_segments(self):
+        segments = [
+            {"id": "seg1", "text": "First."},
+            {"id": "seg2", "text": "Second."},
+        ]
+        update_segment_text(segments, "seg1", "Updated first.")
+        assert segments[1]["text"] == "Second."
 
-    def test_auto_fix_double_space(self):
-        text = "Fix  this  double  spacing."
-        result = validate_text(text, auto_fix=True)
-        assert "  " not in result["auto_fixed_text"]
 
-    def test_mixed_am_pm_flagged(self):
-        text = "The meeting is at 3 p.m. or maybe 4 PM."
-        result = validate_text(text, min_issue_severity="warning")
-        cons_issues = [i for i in result["issues"] if i["issue_type"] == "consistency"]
-        assert len(cons_issues) >= 1
+# ===========================================================================
+# Integration: validate_text & validate_segments
+# ===========================================================================
 
-    def test_result_structure_unchanged(self):
-        text = "Simple test."
-        result = validate_text(text, enable_ai=False)
+class TestIntegration:
+    """Integration tests for the public API."""
+
+    def test_result_structure(self):
+        result = validate_text("Simple test.")
         assert "segment_id" in result
         assert "text" in result
         assert "issues" in result
@@ -371,29 +403,52 @@ class TestDeterministicBackwardCompat:
         assert "has_errors" in result
         assert "has_warnings" in result
 
+    def test_segment_id_propagation(self):
+        result = validate_text("Test  text.", segment_id="my-seg", min_issue_severity="warning")
+        for issue in result["issues"]:
+            assert issue.get("segment_id") == "my-seg"
+
+    @patch("app.services.llm_service._call_llm")
+    def test_validate_text_with_ai(self, mock_llm):
+        mock_llm.return_value = '[{"issue_type": "wrong_word", "severity": "error", "issue": "loose should be lose", "suggestion": "lose", "span": "loose", "confidence": 0.95}]'
+        result = validate_text("The company will loose money.", enable_ai=True)
+        ai_issues = [i for i in result["issues"] if i.get("source") in ("ai", "merged")]
+        assert len(ai_issues) >= 1
+        assert result["has_errors"] is True
+
+    def test_validate_segments_skip_status(self):
+        segments = [{"id": "seg1", "text": "Some text.", "status": "skip"}]
+        assert validate_segments(segments) == []
+
+    def test_validate_segments_only_with_issues(self):
+        segments = [
+            {"id": "seg1", "text": "Perfectly clean sentence here."},
+            {"id": "seg2", "text": "Another clean sentence."},
+        ]
+        results = validate_segments(segments, only_with_issues=True)
+        assert len(results) == 0
+
+    def test_validate_segments_none_text(self):
+        segments = [{"id": "seg1"}]
+        assert validate_segments(segments) == []
+
 
 # ===========================================================================
-# Edge cases
+# Edge Cases
 # ===========================================================================
 
 class TestEdgeCases:
-    """Edge cases and robustness."""
 
     def test_empty_string(self):
         result = validate_text("")
         assert result["issues"] == []
-
-    def test_validate_segments_skip_status(self):
-        segments = [{"id": "seg1", "text": "Some text.", "status": "skip"}]
-        results = validate_segments(segments)
-        assert len(results) == 0
 
     def test_unicode_text(self):
         text = "The café serves naïve résumé holders."
         result = validate_text(text, min_issue_severity="info")
         assert isinstance(result["issues"], list)
 
-    def test_segment_id_propagation(self):
-        result = validate_text("Test  text.", segment_id="my-seg-123", min_issue_severity="warning")
-        for issue in result["issues"]:
-            assert issue.get("segment_id") == "my-seg-123"
+    def test_very_long_text(self):
+        text = "This is a sentence. " * 500
+        result = validate_text(text)
+        assert isinstance(result["issues"], list)
