@@ -1,24 +1,16 @@
 """
-Source validation service — v3 (LLM-first).
+Source validation service — LLM-First Architecture.
 
 Architecture:
-  Layer 1 (Fast Guard): Single rule — double spaces. Zero false-positive risk.
-    Runs on every call, provides instant auto-fix capability.
+  Layer 1 (Fast Guard & Consistency): 
+    - Double space detection (zero false positive).
+    - Cross-document deterministic consistency (hyphenation/capitalization drift).
+      (Handled deterministically as LLMs cannot effectively find document-wide 
+       drifts while operating on isolated small text batches).
 
-  Layer 2 (LLM Agent): The single source of truth for ALL linguistic analysis.
-    Covers 5 categories:
-      1. SPELLING     — Misspellings, typos (domain-aware via document context)
-      2. GRAMMAR      — Subject-verb agreement, tense, articles, wrong-word
-      3. CONSISTENCY  — Terminology variations across the document
-      4. PUNCTUATION  — Missing/extra/incorrect punctuation
-      5. FORMATTING   — Capitalization, number formatting, spacing issues
-
-  The LLM receives document classification context (type, domain, register,
-  domain_keywords) and cross-segment term frequency summaries to provide
-  highly accurate, context-aware validation with no false positives.
-
-  enable_ai=True activates Layer 2. When False, only double-space
-  detection runs (free, instant).
+  Layer 2 (LLM Agent - DEFAULT): 
+    - The sole authority for logic, semantics, spelling, grammar, punctuation, and clarity.
+    - Processed in robust batches (batch_size=20) to prevent 429 Rate Limits from APIs.
 """
 
 import re
@@ -31,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 
 # ===========================================================================
-# LAYER 1: Fast Guard (single rule, zero false positives)
+# LAYER 1: Fast Guard & Cross-Document Consistency
 # ===========================================================================
 
 _DOUBLE_SPACE_PATTERN = re.compile(r"  +")
@@ -49,11 +41,9 @@ _STOP_WORDS = {
     "could", "should", "being", "first", "where", "between", "through",
 }
 
-
 def _fast_guard(text: str) -> List[Dict]:
     """
-    Layer 1: Only detect double spaces — the ONE deterministic rule
-    with truly zero false-positive risk.
+    Detect double spaces — the ONE deterministic rule with zero false-positive risk.
     """
     issues = []
     for m in _DOUBLE_SPACE_PATTERN.finditer(text):
@@ -61,6 +51,7 @@ def _fast_guard(text: str) -> List[Dict]:
             "issue_type": "formatting",
             "issue":      "Double space detected",
             "suggestion": "Replace with a single space",
+            "span":       m.group(0),
             "severity":   "warning",
             "offset":     m.start(),
             "length":     len(m.group(0)),
@@ -69,115 +60,88 @@ def _fast_guard(text: str) -> List[Dict]:
         })
     return issues
 
-
 def _auto_fix(text: str) -> str:
-    """Auto-fix deterministic issues (double spaces only)."""
+    """Auto-fix deterministic issues (double spaces)."""
     return _DOUBLE_SPACE_PATTERN.sub(" ", text)
 
+def _canonicalize_term(term: str) -> str:
+    """Normalize a term for lightweight terminology consistency checks."""
+    return re.sub(r"[^a-z0-9]", "", term.lower())
 
-# ===========================================================================
-# LAYER 2: LLM Agent (comprehensive contextual validation)
-# ===========================================================================
+def _deterministic_consistency_issues(segments: List[Dict]) -> Dict[str, List[Dict]]:
+    """
+    Flag obvious terminology notation drift across a document.
+    Crucial for cross-document continuity that batch-processed LLMs cannot see.
+    """
+    occurrences: Dict[str, Dict[str, Any]] = {}
 
-_VALIDATION_SYSTEM_PROMPT = """You are an expert editor, proofreader, and language quality analyst for enterprise documents. Your task is to analyze text for quality issues that a machine translation pipeline will consume.
+    for seg in segments:
+        if seg.get("status") == "skip":
+            continue
 
-You MUST return ONLY a valid JSON array. No markdown, no explanation, no wrapping — just the raw JSON array.
+        text = seg.get("text", "") or ""
+        seg_id = seg.get("id")
+        if not seg_id or not text.strip():
+            continue
 
-Analyze the text across these 5 categories:
+        for match in _TERM_PATTERN.finditer(text):
+            term = match.group(0)
+            canonical = _canonicalize_term(term)
 
-1. SPELLING — Misspellings, typos. Do NOT flag:
-   - Proper nouns, brand names, company names
-   - Domain-specific technical terms or jargon
-   - Standard abbreviations (e.g., CAGR, EBITDA, API)
-   - Words that are correct in context
+            if len(canonical) < 3 or canonical in _STOP_WORDS:
+                continue
 
-2. GRAMMAR — Subject-verb disagreement, wrong tense, missing/extra articles, wrong-word usage (e.g., "loose" vs "lose", "their" vs "there", "affect" vs "effect")
+            entry = occurrences.setdefault(canonical, {"variants": {}, "first_seen": []})
+            variant_occurrences = entry["variants"].setdefault(term, [])
+            variant_occurrences.append({
+                "segment_id": seg_id,
+                "offset": match.start(),
+                "length": len(term),
+                "span": term,
+            })
+            if term not in entry["first_seen"]:
+                entry["first_seen"].append(term)
 
-3. CONSISTENCY — Flag ONLY when you see genuinely inconsistent notation within the provided text (e.g., "p.m." in one place and "PM" in another). Do NOT flag a term that appears in only one form.
+    issues_by_segment: Dict[str, List[Dict]] = {}
 
-4. PUNCTUATION — Missing periods, wrong comma usage, misused semicolons. Do NOT flag stylistic punctuation choices that are valid in context.
+    for entry in occurrences.values():
+        variants = entry["variants"]
+        if len(variants) < 2:
+            continue
 
-5. FORMATTING — Inconsistent capitalization of the same term, inconsistent number formatting (mixing "10" and "ten" in same context), spacing around special characters.
+        counts = {variant: len(variant_occurrences) for variant, variant_occurrences in variants.items()}
+        preferred = max(
+            counts.items(),
+            key=lambda item: (item[1], -entry["first_seen"].index(item[0])),
+        )[0]
 
-For each issue found, return an object with these exact keys:
-{
-  "issue_type": "spelling" | "grammar" | "consistency" | "punctuation" | "formatting" | "wrong_word" | "clarity",
-  "severity": "error" | "warning" | "info",
-  "issue": "clear description of the problem",
-  "suggestion": "the corrected version of the problematic span",
-  "span": "the exact problematic text from the input",
-  "confidence": 0.0 to 1.0
-}
+        variant_keys = {_canonicalize_term(variant) for variant in variants}
+        if len(variant_keys) != 1:
+            continue
 
-Severity guide:
-- "error": Changes meaning, factually broken grammar, wrong word that alters semantics
-- "warning": Likely a mistake but text is still understandable
-- "info": Style suggestion that improves readability but is not wrong
+        for variant, variant_occurrences in variants.items():
+            if variant == preferred:
+                continue
 
-Critical rules:
-1. If the text is clean, return an empty array: []
-2. Be precise with "span" — copy the EXACT text from the input.
-3. Keep confidence > 0.8 for clear errors, lower for style suggestions.
-4. NEVER flag things that are stylistic preferences rather than genuine errors.
-5. NEVER flag domain-specific terms, abbreviations, or proper nouns as spelling errors.
-6. For consistency: only flag if BOTH variants actually appear in the provided text."""
+            only_case_change = variant.lower() == preferred.lower()
+            issue_type = "formatting" if only_case_change else "consistency"
+            severity = "info" if only_case_change else "warning"
 
-_DOCUMENT_CONTEXT_ADDITION = """
-Document Context:
-- Document type: {document_type}
-- Domain: {domain}
-- Register/tone: {register}
-- Domain-specific keywords (do NOT flag these as spelling errors): {domain_keywords}
+            for occurrence in variant_occurrences:
+                seg_id = occurrence["segment_id"]
+                issues_by_segment.setdefault(seg_id, []).append({
+                    "issue_type": issue_type,
+                    "issue": f"Inconsistent terminology variant: '{variant}' differs from preferred '{preferred}' used elsewhere.",
+                    "suggestion": preferred,
+                    "span": occurrence["span"],
+                    "severity": severity,
+                    "offset": occurrence["offset"],
+                    "length": occurrence["length"],
+                    "confidence": 0.9,
+                    "source": "deterministic_consistency",
+                })
 
-Use this context to calibrate your analysis. Domain-specific terminology is expected and correct.
-"""
-
-_CROSS_SEGMENT_ADDITION = """
-Additionally, here is a summary of terminology used across the entire document. Flag any inconsistencies you notice in the text being analyzed (e.g., the text uses "customer" but the rest of the document predominantly uses "client"):
-
-Document Term Summary:
-{term_summary}
-"""
-
-_BATCH_VALIDATION_USER_PROMPT = """Analyze each of the following text segments for quality issues. Return a JSON object where keys are the segment IDs and values are arrays of issues (same format as above). If a segment is clean, its value should be an empty array.
-
-{segments_block}
-
-Return ONLY the JSON object. No markdown fences, no explanation."""
-
-
-def _build_ai_validation_prompt(
-    text: str,
-    term_summary: Optional[str] = None,
-    document_context: Optional[Dict] = None,
-) -> Tuple[str, str]:
-    """Build the system and user prompts for AI validation."""
-    system = _VALIDATION_SYSTEM_PROMPT
-
-    if document_context:
-        system += _DOCUMENT_CONTEXT_ADDITION.format(
-            document_type=document_context.get("document_type", "general"),
-            domain=document_context.get("domain", "general"),
-            register=document_context.get("register", "formal"),
-            domain_keywords=", ".join(document_context.get("domain_keywords", [])) or "none",
-        )
-
-    if term_summary:
-        system += _CROSS_SEGMENT_ADDITION.format(term_summary=term_summary)
-
-    user = f'Analyze this text for quality issues:\n"""\n{text}\n"""'
-    return system, user
-
-
-# ---------------------------------------------------------------------------
-# Response parsing
-# ---------------------------------------------------------------------------
-
-_VALID_ISSUE_TYPES = {
-    "grammar", "spelling", "style", "consistency", "clarity",
-    "wrong_word", "punctuation", "formatting",
-}
-
+    return issues_by_segment
 
 def _resolve_span_position(
     text: str,
@@ -208,22 +172,102 @@ def _resolve_span_position(
     return None, None
 
 
+# ===========================================================================
+# LAYER 2: LLM Agent (comprehensive contextual validation)
+# ===========================================================================
+
+_VALIDATION_SYSTEM_PROMPT = """You are an expert editor, proofreader, and language quality analyst for enterprise documents. Your task is to analyze text for quality issues before machine translation.
+
+You MUST return ONLY a valid JSON array. No markdown, no explanation, no wrapping — just the raw JSON array.
+
+Analyze the text across these categories:
+
+1. SPELLING — Misspellings, typos. Do NOT flag:
+   - Proper nouns, brand names, company names
+   - Domain-specific technical terms or jargon
+   - Words that are correct in context
+
+2. GRAMMAR — Subject-verb disagreement, wrong tense, missing/extra articles.
+
+3. WRONG WORD — Homophone confusion (e.g., "loose" vs "lose", "their" vs "there", "affect" vs "effect").
+
+4. PUNCTUATION — Missing periods, wrong comma usage, misused semicolons. Do NOT flag stylistic choices.
+
+5. CLARITY — Awkward phrasing that might confuse a machine translator.
+
+For each issue found, return an object with these exact keys:
+{
+  "issue_type": "spelling" | "grammar" | "punctuation" | "wrong_word" | "clarity",
+  "severity": "error" | "warning" | "info",
+  "issue": "clear description of the problem",
+  "suggestion": "the corrected version of the problematic span",
+  "span": "the exact problematic text from the input",
+  "confidence": 0.0 to 1.0
+}
+
+Severity guide:
+- "error": Changes meaning, factually broken grammar, wrong word that alters semantics
+- "warning": Likely a mistake but text is still understandable
+- "info": Style suggestion that improves readability
+
+Critical rules:
+1. If the text is clean, return an empty array: []
+2. Be precise with "span" — copy the EXACT text from the input.
+3. Keep confidence > 0.8 for clear errors, lower for style.
+4. NEVER flag proper nouns or domain keywords as spelling errors."""
+
+_DOCUMENT_CONTEXT_ADDITION = """
+Document Context:
+- Document type: {document_type}
+- Domain: {domain}
+- Register/tone: {register}
+- Domain-specific keywords (do NOT flag these as spelling errors): {domain_keywords}
+
+Use this context to calibrate your analysis. Domain-specific terminology is expected and correct.
+"""
+
+_BATCH_VALIDATION_USER_PROMPT = """Analyze each of the following text segments for quality issues. Return a JSON object where keys are the segment IDs and values are arrays of issues (same format as above). If a segment is clean, its value should be an empty array.
+
+{segments_block}
+
+Return ONLY the JSON object. No markdown fences, no explanation."""
+
+
+def _build_ai_validation_prompt(
+    text: str,
+    document_context: Optional[Dict] = None,
+) -> Tuple[str, str]:
+    """Build the system and user prompts for AI validation."""
+    system = _VALIDATION_SYSTEM_PROMPT
+
+    if document_context:
+        system += _DOCUMENT_CONTEXT_ADDITION.format(
+            document_type=document_context.get("document_type", "general"),
+            domain=document_context.get("domain", "general"),
+            register=document_context.get("register", "formal"),
+            domain_keywords=", ".join(document_context.get("domain_keywords", [])) or "none",
+        )
+
+    user = f'Analyze this text for quality issues:\n"""\n{text}\n"""'
+    return system, user
+
+
+_VALID_ISSUE_TYPES = {
+    "grammar", "spelling", "style", "consistency", "clarity",
+    "wrong_word", "punctuation", "formatting",
+}
+
 def _parse_ai_response(raw: str) -> List[Dict]:
-    """
-    Parse the LLM's JSON response into a list of issue dicts.
-    Handles common LLM output quirks (markdown fences, wrapper objects, etc.).
-    """
+    """Parse the LLM's JSON response into a list of issue dicts."""
     cleaned = raw.strip()
     if not cleaned:
         return []
 
-    # Strip markdown code fences if present
     if cleaned.startswith("```"):
         cleaned = re.sub(r"^```[a-zA-Z]*\n?", "", cleaned)
         cleaned = re.sub(r"\n?```$", "", cleaned)
         cleaned = cleaned.strip()
 
-    # Handle case where LLM wraps in { "issues": [...] }
     try:
         parsed = json.loads(cleaned)
         if isinstance(parsed, dict):
@@ -244,9 +288,8 @@ def _parse_ai_response(raw: str) -> List[Dict]:
         logger.warning(f"Failed to parse AI validation response: {cleaned[:200]}")
         return []
 
-
 def _normalize_issue(issue: Dict, text: str) -> Optional[Dict]:
-    """Normalize a single AI issue dict into our standard format."""
+    """Normalize a single AI issue dict into standard format."""
     if not isinstance(issue, dict):
         return None
 
@@ -292,68 +335,24 @@ def _normalize_issue(issue: Dict, text: str) -> Optional[Dict]:
     }
 
 
-# ---------------------------------------------------------------------------
-# Single-segment AI validation
-# ---------------------------------------------------------------------------
-
-def _ai_validate(
-    text: str,
-    term_summary: Optional[str] = None,
-    document_context: Optional[Dict] = None,
-) -> List[Dict]:
-    """
-    Layer 2: Use the LLM to perform context-aware validation on a single text.
-    Returns a list of normalized issue dicts.
-    """
-    if not text or not text.strip():
-        return []
-
-    try:
-        from app.services.llm_service import _call_llm
-    except ImportError:
-        logger.warning("LLM service not available — AI validation skipped.")
-        return []
-
-    system, user = _build_ai_validation_prompt(text, term_summary, document_context)
-
-    try:
-        raw_response = _call_llm(system, user, max_tokens=2048)
-    except Exception as e:
-        logger.warning(f"AI validation LLM call failed: {e}")
-        return []
-
-    raw_issues = _parse_ai_response(raw_response)
-
-    normalized = []
-    for issue in raw_issues:
-        n = _normalize_issue(issue, text)
-        if n:
-            normalized.append(n)
-
-    return normalized
-
-
-# ---------------------------------------------------------------------------
-# Batched multi-segment AI validation
-# ---------------------------------------------------------------------------
-
 def _ai_validate_batch(
     segments: List[Dict],
-    term_summary: Optional[str] = None,
-    batch_size: int = 5,
+    batch_size: int = 20,
     document_context: Optional[Dict] = None,
-) -> Dict[str, List[Dict]]:
+) -> Dict[str, Optional[List[Dict]]]:
     """
-    Batch AI validation: packs multiple segments into a single LLM call.
-    Returns {segment_id: [issues]} mapping.
+    Batch AI validation logic.
+    Returns Dictionary Mapping Segment ID to a List of Issues.
+    If the API fails to process the batch, it returns `None` for those segments' issues to indicate failure.
     """
     try:
         from app.services.llm_service import _call_llm
     except ImportError:
-        logger.warning("LLM service not available — AI batch validation skipped.")
-        return {}
+        logger.warning("LLM service not available.")
+        # None indicates API failure 
+        return {s.get("id"): None for s in segments if s.get("id")}
 
-    results: Dict[str, List[Dict]] = {}
+    results: Dict[str, Optional[List[Dict]]] = {}
 
     valid_segments = [
         s for s in segments
@@ -380,200 +379,68 @@ def _ai_validate_batch(
                 register=document_context.get("register", "formal"),
                 domain_keywords=", ".join(document_context.get("domain_keywords", [])) or "none",
             )
-        if term_summary:
-            system += _CROSS_SEGMENT_ADDITION.format(term_summary=term_summary)
 
         user = _BATCH_VALIDATION_USER_PROMPT.format(segments_block=segments_block)
 
         try:
+            logger.info(f"Dispatching AI Validation Batch {i//batch_size + 1}")
             raw_response = _call_llm(system, user, max_tokens=4096)
         except Exception as e:
-            logger.warning(f"AI batch validation failed for batch {i//batch_size}: {e}")
+            logger.warning(f"AI batch validation failed (429 or Timeout) for batch {i//batch_size + 1}: {e}")
             for seg in batch:
-                results[seg.get("id", "")] = []
+                results[seg.get("id", "")] = None # None denotes API Failure, not a clean text array
             continue
 
-        parsed = _parse_batch_response(raw_response, batch)
-        results.update(parsed)
+        # Parse logic
+        cleaned = raw_response.strip()
+        if cleaned.startswith("```"):
+            cleaned = re.sub(r"^```[a-zA-Z]*\n?", "", cleaned)
+            cleaned = re.sub(r"\n?```$", "", cleaned)
+            cleaned = cleaned.strip()
+
+        try:
+            parsed = json.loads(cleaned)
+        except json.JSONDecodeError:
+            match = re.search(r'\{.*\}', cleaned, re.DOTALL)
+            if match:
+                try:
+                    parsed = json.loads(match.group(0))
+                except json.JSONDecodeError:
+                    parsed = {}
+            else:
+                parsed = {}
+
+        if not isinstance(parsed, dict):
+            parsed = {}
+
+        for seg in batch:
+            sid = seg.get("id", "")
+            text = seg.get("text", "")
+            raw_issues = parsed.get(sid, [])
+            
+            if not isinstance(raw_issues, list):
+                results[sid] = None # LLM returned bad format for this segment
+                continue
+
+            normalized = []
+            for issue in raw_issues:
+                n = _normalize_issue(issue, text)
+                if n:
+                    normalized.append(n)
+
+            results[sid] = normalized
 
     return results
 
-
-def _parse_batch_response(raw: str, batch: List[Dict]) -> Dict[str, List[Dict]]:
-    """Parse a batch AI validation response into per-segment issue lists."""
-    cleaned = raw.strip()
-
-    if cleaned.startswith("```"):
-        cleaned = re.sub(r"^```[a-zA-Z]*\n?", "", cleaned)
-        cleaned = re.sub(r"\n?```$", "", cleaned)
-        cleaned = cleaned.strip()
-
-    results: Dict[str, List[Dict]] = {}
-
-    try:
-        parsed = json.loads(cleaned)
-    except json.JSONDecodeError:
-        match = re.search(r'\{.*\}', cleaned, re.DOTALL)
-        if match:
-            try:
-                parsed = json.loads(match.group(0))
-            except json.JSONDecodeError:
-                return {seg.get("id", ""): [] for seg in batch}
-        else:
-            return {seg.get("id", ""): [] for seg in batch}
-
-    if not isinstance(parsed, dict):
-        return {seg.get("id", ""): [] for seg in batch}
-
-    for seg in batch:
-        sid = seg.get("id", "")
-        text = seg.get("text", "")
-        raw_issues = parsed.get(sid, [])
-        if not isinstance(raw_issues, list):
-            raw_issues = []
-
-        normalized = []
-        for issue in raw_issues:
-            n = _normalize_issue(issue, text)
-            if n:
-                normalized.append(n)
-
-        results[sid] = normalized
-
-    return results
-
-
 # ===========================================================================
-# Cross-segment consistency analysis
-# ===========================================================================
-
-def _build_term_summary(segments: List[Dict]) -> Optional[str]:
-    """
-    Extract significant terms from all segments and build a frequency summary.
-    This is passed to the AI agent so it can flag cross-document inconsistencies
-    (e.g., "client" used 12 times vs "customer" used 3 times).
-    """
-    all_text = " ".join(seg.get("text", "") for seg in segments if seg.get("text"))
-    if not all_text.strip():
-        return None
-
-    words = re.findall(r"\b[a-zA-Z]{3,}\b", all_text.lower())
-    words = [w for w in words if w not in _STOP_WORDS and not w.isupper()]
-
-    counter = Counter(words)
-    frequent = {term: count for term, count in counter.items() if count >= 2}
-
-    if not frequent:
-        return None
-
-    sorted_terms = sorted(frequent.items(), key=lambda x: -x[1])[:50]
-    lines = [f"  {term}: {count}x" for term, count in sorted_terms]
-    return "\n".join(lines)
-
-
-def _canonicalize_term(term: str) -> str:
-    """Normalize a term for lightweight terminology consistency checks."""
-    return re.sub(r"[^a-z0-9]", "", term.lower())
-
-
-def _deterministic_consistency_issues(segments: List[Dict]) -> Dict[str, List[Dict]]:
-    """
-    Flag obvious terminology notation drift across a document.
-
-    This intentionally targets low-risk cases such as:
-    - hyphenation drift: "e-mail" vs "email"
-    - capitalization drift: "api" vs "API"
-    - casing/notation drift for repeated technical terms
-    """
-    occurrences: Dict[str, Dict[str, Any]] = {}
-
-    for seg in segments:
-        if seg.get("status") == "skip":
-            continue
-
-        text = seg.get("text", "") or ""
-        seg_id = seg.get("id")
-        if not seg_id or not text.strip():
-            continue
-
-        for match in _TERM_PATTERN.finditer(text):
-            term = match.group(0)
-            canonical = _canonicalize_term(term)
-
-            if len(canonical) < 3 or canonical in _STOP_WORDS:
-                continue
-
-            entry = occurrences.setdefault(canonical, {"variants": {}, "first_seen": []})
-            variant_occurrences = entry["variants"].setdefault(term, [])
-            variant_occurrences.append({
-                "segment_id": seg_id,
-                "offset": match.start(),
-                "length": len(term),
-                "span": term,
-            })
-            if term not in entry["first_seen"]:
-                entry["first_seen"].append(term)
-
-    issues_by_segment: Dict[str, List[Dict]] = {}
-
-    for entry in occurrences.values():
-        variants = entry["variants"]
-        if len(variants) < 2:
-            continue
-
-        counts = {variant: len(variant_occurrences) for variant, variant_occurrences in variants.items()}
-        preferred = max(
-            counts.items(),
-            key=lambda item: (item[1], -entry["first_seen"].index(item[0])),
-        )[0]
-
-        # Avoid noisy sentence-initial capitalization drift like "Client" vs "client".
-        variant_keys = {_canonicalize_term(variant) for variant in variants}
-        if len(variant_keys) != 1:
-            continue
-
-        for variant, variant_occurrences in variants.items():
-            if variant == preferred:
-                continue
-
-            only_case_change = variant.lower() == preferred.lower()
-            issue_type = "formatting" if only_case_change else "consistency"
-            severity = "info" if only_case_change else "warning"
-
-            for occurrence in variant_occurrences:
-                seg_id = occurrence["segment_id"]
-                issues_by_segment.setdefault(seg_id, []).append({
-                    "issue_type": issue_type,
-                    "issue": f"Inconsistent terminology variant: '{variant}' differs from preferred '{preferred}' used elsewhere in the document.",
-                    "suggestion": preferred,
-                    "span": occurrence["span"],
-                    "severity": severity,
-                    "offset": occurrence["offset"],
-                    "length": occurrence["length"],
-                    "confidence": 0.9,
-                    "source": "deterministic_consistency",
-                })
-
-    return issues_by_segment
-
-
-# ===========================================================================
-# Issue deduplication (merge Layer 1 + Layer 2)
+# Issue Merge Operator
 # ===========================================================================
 
 def _merge_issues(
     deterministic_issues: List[Dict],
     ai_issues: List[Dict],
 ) -> List[Dict]:
-    """
-    Merge issues from both layers, deduplicating overlapping detections.
-
-    Strategy:
-    - If both layers flag the same span, keep the AI version (richer description)
-      but prefer deterministic offset/length (more accurate positioning).
-    - AI-only issues are added as-is.
-    - Deterministic-only issues are kept as-is.
-    """
+    """Merge issues from both layers, giving priority to AI descriptions on overlaps."""
     if not ai_issues:
         return deterministic_issues
 
@@ -609,7 +476,6 @@ def _merge_issues(
             ai_end = ai_offset + ai_length
 
             if ai_start < det_end and ai_end > det_start:
-                # Overlap — merge: AI description, deterministic positioning
                 merged_issue = {**ai_issue}
                 merged_issue["offset"] = det_offset
                 merged_issue["length"] = det_length
@@ -622,7 +488,6 @@ def _merge_issues(
         if not found_overlap:
             merged.append(det_issue)
 
-    # Add AI-only issues (not consumed by merge)
     for ai_idx, ai_issue in enumerate(ai_issues):
         if ai_idx not in ai_consumed:
             merged.append(ai_issue)
@@ -640,51 +505,48 @@ def validate_text(
     auto_fix: bool = False,
     min_issue_severity: str = "info",
     enable_ai: bool = True,
-    term_summary: Optional[str] = None,
     document_context: Optional[Dict] = None,
 ) -> Dict:
-    """
-    Validate source text with LLM-first architecture.
-
-    Args:
-        text: The source text to validate.
-        segment_id: Optional segment identifier.
-        auto_fix: If True, apply deterministic auto-fixes (double spaces).
-        min_issue_severity: Filter threshold ("info", "warning", "error").
-        enable_ai: If True, run LLM-powered comprehensive validation.
-        term_summary: Optional cross-document term frequency summary.
-        document_context: Dict with document_type, domain, register, domain_keywords.
-    """
-    # ── Layer 1: Fast guard (double spaces only) ─────────────────────
+    """Validate a single target free-text node using the LLM & Deterministic spacing."""
     deterministic_issues = _fast_guard(text)
-
-    # ── Layer 2: LLM Agent (comprehensive, opt-in) ──────────────────
     ai_issues: List[Dict] = []
+    
     if enable_ai:
-        ai_issues = _ai_validate(
-            text,
-            term_summary=term_summary,
-            document_context=document_context,
-        )
+        try:
+            from app.services.llm_service import _call_llm
+            system, user = _build_ai_validation_prompt(text, document_context)
+            raw_response = _call_llm(system, user, max_tokens=2048)
+            raw_issues = _parse_ai_response(raw_response)
+            ai_issues = [_normalize_issue(i, text) for i in raw_issues]
+            ai_issues = [i for i in ai_issues if i]
+        except Exception as e:
+            logger.warning(f"AI Text Validation Failed: {e}")
+            ai_issues = [{
+                "issue_type": "clarity",
+                "issue": f"AI Validation API Failed to Validate Text: {str(e)}",
+                "suggestion": "",
+                "span": "",
+                "severity": "error",
+                "offset": 0,
+                "length": 0,
+                "confidence": 1.0,
+                "source": "api_system_error",
+            }]
 
-    # ── Merge & deduplicate ──────────────────────────────────────────
     all_issues = _merge_issues(deterministic_issues, ai_issues)
 
-    # Severity filter
     threshold = _SEVERITY_ORDER.get(min_issue_severity, 0)
-    all_issues = [i for i in all_issues if _SEVERITY_ORDER.get(i["severity"], 0) >= threshold]
+    all_issues = [i for i in all_issues if _SEVERITY_ORDER.get(i.get("severity", "info"), 0) >= threshold]
 
     if segment_id:
         for issue in all_issues:
             issue["segment_id"] = segment_id
 
-    fixed_text = _auto_fix(text) if auto_fix else None
-
     return {
         "segment_id":      segment_id,
         "text":            text,
         "issues":          all_issues,
-        "auto_fixed_text": fixed_text,
+        "auto_fixed_text": _auto_fix(text) if auto_fix else None,
         "has_errors":      any(i["severity"] == "error"   for i in all_issues),
         "has_warnings":    any(i["severity"] == "warning" for i in all_issues),
     }
@@ -699,22 +561,16 @@ def validate_segments(
     document_context: Optional[Dict] = None,
 ) -> List[Dict]:
     """
-    Validate a list of segment dicts.
-
-    When enable_ai=True:
-    1. Builds a cross-document term summary from ALL segments.
-    2. Sends segments in batched LLM calls for AI validation.
-    3. Merges AI issues with deterministic issues per-segment.
+    Validate a list of segment dicts. Completely bypasses static LLM fallbacks.
+    Provides Error placeholders when AI rate-limiting crashes batches.
     """
-    term_summary = None
-    ai_results: Dict[str, List[Dict]] = {}
+    ai_results = {}
     consistency_results = _deterministic_consistency_issues(segments)
 
     if enable_ai:
-        term_summary = _build_term_summary(segments)
         ai_results = _ai_validate_batch(
             segments,
-            term_summary=term_summary,
+            batch_size=20, # Higher batch size to prevent 429 Limit from groq
             document_context=document_context,
         )
 
@@ -726,30 +582,42 @@ def validate_segments(
         if not text.strip() or seg.get("status") == "skip":
             continue
 
-        # Layer 1: fast guard
         deterministic_issues = _fast_guard(text)
 
-        # Layer 2: AI (already computed in batch)
-        ai_issues = ai_results.get(seg_id, [])
+        if enable_ai:
+            raw_ai = ai_results.get(seg_id)
+            if raw_ai is None: # None denotes API Failure, distinct from an empty list `[]` (clean)
+                ai_issues = [{
+                    "issue_type": "clarity",
+                    "issue": "AI Validation Batch Failed (API Rate Limit / Timeout). Validation skipped.",
+                    "suggestion": "",
+                    "span": None,
+                    "severity": "error",
+                    "offset": None,
+                    "length": None,
+                    "confidence": 1.0,
+                    "source": "api_system_error",
+                }]
+            else:
+                ai_issues = raw_ai
+        else:
+            ai_issues = []
 
-        # Merge deterministic spacing, AI issues, and document-level consistency.
         all_issues = _merge_issues(deterministic_issues, ai_issues)
         all_issues.extend(consistency_results.get(seg_id, []))
 
         threshold = _SEVERITY_ORDER.get(min_issue_severity, 0)
-        all_issues = [i for i in all_issues if _SEVERITY_ORDER.get(i["severity"], 0) >= threshold]
+        all_issues = [i for i in all_issues if _SEVERITY_ORDER.get(i.get("severity", "info"), 0) >= threshold]
 
         if seg_id:
             for issue in all_issues:
                 issue["segment_id"] = seg_id
 
-        fixed_text = _auto_fix(text) if auto_fix else None
-
         result = {
             "segment_id":      seg_id,
             "text":            text,
             "issues":          all_issues,
-            "auto_fixed_text": fixed_text,
+            "auto_fixed_text": _auto_fix(text) if auto_fix else None,
             "has_errors":      any(i["severity"] == "error"   for i in all_issues),
             "has_warnings":    any(i["severity"] == "warning" for i in all_issues),
         }
@@ -770,26 +638,9 @@ def apply_ai_fixes(
     segment_ids: Optional[List[str]] = None,
     document_context: Optional[Dict] = None,
 ) -> Dict:
-    """
-    Run AI validation on specified segments and auto-apply the suggestions.
-
-    For each segment:
-    1. Run AI validation to get issues with suggestions.
-    2. Apply suggestions by replacing spans in the original text.
-    3. Update segment text in-place.
-
-    Args:
-        segments: List of segment dicts (modified in-place).
-        segment_ids: If provided, only fix these segments. Otherwise fix all.
-        document_context: Classification context for the LLM.
-
-    Returns:
-        { "fixed_count": int, "fixes": [{ segment_id, original, fixed, issues_fixed }] }
-    """
+    """Run AI validation on specified segments and auto-apply the suggestions."""
     target_ids = set(segment_ids) if segment_ids else None
 
-    # Get AI validation results
-    term_summary = _build_term_summary(segments)
     target_segments = [
         s for s in segments
         if s.get("text", "").strip()
@@ -802,7 +653,7 @@ def apply_ai_fixes(
 
     ai_results = _ai_validate_batch(
         target_segments,
-        term_summary=term_summary,
+        batch_size=20,
         document_context=document_context,
     )
 
@@ -812,12 +663,12 @@ def apply_ai_fixes(
     for seg in target_segments:
         sid = seg.get("id")
         original_text = seg.get("text", "")
-        issues = ai_results.get(sid, [])
+        issues = ai_results.get(sid)
 
-        if not issues:
+        # None means failure, [] means clean. Skip both.
+        if not issues: 
             continue
 
-        # Apply fixes from right to left (so offsets don't shift)
         fixable = [
             i for i in issues
             if i.get("offset") is not None
@@ -834,7 +685,6 @@ def apply_ai_fixes(
             end = start + issue["length"]
             span = fixed_text[start:end]
 
-            # Verify the span still matches what AI expects
             if issue.get("span") and span != issue["span"]:
                 continue
 
@@ -842,7 +692,6 @@ def apply_ai_fixes(
             applied.append(issue)
 
         if applied and fixed_text != original_text:
-            # Update the segment in-place
             if sid in seg_index:
                 seg_index[sid]["text"] = fixed_text
             seg["text"] = fixed_text
@@ -862,12 +711,6 @@ def update_segment_text(
     segment_id: str,
     new_text: str,
 ) -> Optional[Dict]:
-    """
-    Update a segment's text with user-provided content.
-
-    Used when the user manually edits a flagged segment before translation.
-    Returns the updated segment dict, or None if not found.
-    """
     for seg in segments:
         if seg.get("id") == segment_id:
             old_text = seg.get("text", "")

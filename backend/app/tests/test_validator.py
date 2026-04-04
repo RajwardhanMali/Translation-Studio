@@ -20,9 +20,8 @@ from app.services.validator import (
     validate_segments,
     _fast_guard,
     _merge_issues,
-    _build_term_summary,
+    _merge_issues,
     _parse_ai_response,
-    _ai_validate,
     _ai_validate_batch,
     apply_ai_fixes,
     update_segment_text,
@@ -65,38 +64,38 @@ class TestZeroFalsePositives:
     def test_eg_not_flagged(self):
         """'e.g.' must NOT trigger consistency false positive."""
         text = "The AI data services market is growing (e.g. West Coast)."
-        result = validate_text(text, min_issue_severity="info")
+        result = validate_text(text, min_issue_severity="info", enable_ai=False)
         consistency = [i for i in result["issues"] if i["issue_type"] == "consistency"]
         assert len(consistency) == 0
 
     def test_ie_not_flagged(self):
         """'i.e.' must NOT trigger consistency false positive."""
         text = "The primary metric (i.e. revenue growth) is tracking well."
-        result = validate_text(text, min_issue_severity="info")
+        result = validate_text(text, min_issue_severity="info", enable_ai=False)
         consistency = [i for i in result["issues"] if i["issue_type"] == "consistency"]
         assert len(consistency) == 0
 
     def test_backend_not_flagged(self):
         text = "The backend service handles all API requests."
-        result = validate_text(text, min_issue_severity="info")
+        result = validate_text(text, min_issue_severity="info", enable_ai=False)
         spelling = [i for i in result["issues"] if i["issue_type"] == "spelling"]
         assert len(spelling) == 0
 
     def test_hrs_not_flagged(self):
         text = "The process takes approximately 3 hrs to complete."
-        result = validate_text(text, min_issue_severity="info")
+        result = validate_text(text, min_issue_severity="info", enable_ai=False)
         spelling = [i for i in result["issues"] if i["issue_type"] == "spelling"]
         assert len(spelling) == 0
 
     def test_domain_terms_not_flagged(self):
         text = "The indemnification clause requires arbitration for liability."
-        result = validate_text(text, min_issue_severity="info")
+        result = validate_text(text, min_issue_severity="info", enable_ai=False)
         spelling = [i for i in result["issues"] if i["issue_type"] == "spelling"]
         assert len(spelling) == 0
 
     def test_clean_text_zero_issues(self):
         text = "This is a perfectly clean sentence with no issues at all."
-        result = validate_text(text, min_issue_severity="info")
+        result = validate_text(text, min_issue_severity="info", enable_ai=False)
         assert len(result["issues"]) == 0
 
     def test_repeated_punctuation_not_flagged_deterministic(self):
@@ -115,12 +114,12 @@ class TestAutoFix:
 
     def test_auto_fix_double_space(self):
         text = "Fix  this  double  spacing."
-        result = validate_text(text, auto_fix=True)
+        result = validate_text(text, auto_fix=True, enable_ai=False)
         assert result["auto_fixed_text"] == "Fix this double spacing."
 
     def test_auto_fix_preserves_clean_text(self):
         text = "Already clean text."
-        result = validate_text(text, auto_fix=True)
+        result = validate_text(text, auto_fix=True, enable_ai=False)
         assert result["auto_fixed_text"] == text
 
 
@@ -160,44 +159,7 @@ class TestAIResponseParsing:
 
 class TestAIValidate:
     """Test AI validation with mocked LLM responses."""
-
-    @patch("app.services.llm_service._call_llm")
-    def test_ai_catches_wrong_word(self, mock_llm):
-        mock_llm.return_value = '[{"issue_type": "wrong_word", "severity": "error", "issue": "Wrong word: loose should be lose", "suggestion": "lose", "span": "loose", "confidence": 0.95}]'
-        issues = _ai_validate("The company will loose money.")
-        assert len(issues) == 1
-        assert issues[0]["issue_type"] == "wrong_word"
-        assert issues[0]["source"] == "ai"
-
-    @patch("app.services.llm_service._call_llm")
-    def test_ai_returns_empty_for_clean_text(self, mock_llm):
-        mock_llm.return_value = "[]"
-        issues = _ai_validate("This is a perfectly written sentence.")
-        assert issues == []
-
-    def test_ai_skips_empty_text(self):
-        assert _ai_validate("") == []
-
-    @patch("app.services.llm_service._call_llm")
-    def test_ai_receives_document_context(self, mock_llm):
-        mock_llm.return_value = "[]"
-        doc_context = {
-            "document_type": "legal_contract",
-            "domain": "legal",
-            "register": "formal",
-            "domain_keywords": ["indemnification", "liability"],
-        }
-        _ai_validate("The indemnification clause is binding.", document_context=doc_context)
-        system_prompt = mock_llm.call_args[0][0]
-        assert "legal_contract" in system_prompt
-        assert "indemnification" in system_prompt
-
-    @patch("app.services.llm_service._call_llm")
-    def test_ai_formatting_category(self, mock_llm):
-        mock_llm.return_value = '[{"issue_type": "formatting", "severity": "info", "issue": "Inconsistent capitalization", "suggestion": "API", "span": "api", "confidence": 0.7}]'
-        issues = _ai_validate("The api endpoint works.")
-        assert len(issues) == 1
-        assert issues[0]["issue_type"] == "formatting"
+    pass
 
 
 # ===========================================================================
@@ -266,26 +228,7 @@ class TestMergeIssues:
         assert _merge_issues([], []) == []
 
 
-# ===========================================================================
-# Cross-segment term summary
-# ===========================================================================
-
-class TestCrossSegmentConsistency:
-    """Test term summary extraction."""
-
-    def test_term_summary_extracts_frequent_terms(self):
-        segments = [
-            {"text": "The client requested a new feature. The client needs it urgently."},
-            {"text": "Our customer support team handles customer complaints."},
-        ]
-        summary = _build_term_summary(segments)
-        assert summary is not None
-        assert "client" in summary
-        assert "customer" in summary
-
-    def test_term_summary_empty_segments(self):
-        segments = [{"text": ""}, {"text": "   "}]
-        assert _build_term_summary(segments) is None
+    pass
 
 
 # ===========================================================================
@@ -395,7 +338,7 @@ class TestIntegration:
     """Integration tests for the public API."""
 
     def test_result_structure(self):
-        result = validate_text("Simple test.")
+        result = validate_text("Simple test.", enable_ai=False)
         assert "segment_id" in result
         assert "text" in result
         assert "issues" in result
@@ -404,7 +347,7 @@ class TestIntegration:
         assert "has_warnings" in result
 
     def test_segment_id_propagation(self):
-        result = validate_text("Test  text.", segment_id="my-seg", min_issue_severity="warning")
+        result = validate_text("Test  text.", segment_id="my-seg", min_issue_severity="warning", enable_ai=False)
         for issue in result["issues"]:
             assert issue.get("segment_id") == "my-seg"
 
@@ -418,19 +361,19 @@ class TestIntegration:
 
     def test_validate_segments_skip_status(self):
         segments = [{"id": "seg1", "text": "Some text.", "status": "skip"}]
-        assert validate_segments(segments) == []
+        assert validate_segments(segments, enable_ai=False) == []
 
     def test_validate_segments_only_with_issues(self):
         segments = [
             {"id": "seg1", "text": "Perfectly clean sentence here."},
             {"id": "seg2", "text": "Another clean sentence."},
         ]
-        results = validate_segments(segments, only_with_issues=True)
+        results = validate_segments(segments, only_with_issues=True, enable_ai=False)
         assert len(results) == 0
 
     def test_validate_segments_none_text(self):
         segments = [{"id": "seg1"}]
-        assert validate_segments(segments) == []
+        assert validate_segments(segments, enable_ai=False) == []
 
 
 # ===========================================================================
@@ -440,15 +383,15 @@ class TestIntegration:
 class TestEdgeCases:
 
     def test_empty_string(self):
-        result = validate_text("")
+        result = validate_text("", enable_ai=False)
         assert result["issues"] == []
 
     def test_unicode_text(self):
         text = "The café serves naïve résumé holders."
-        result = validate_text(text, min_issue_severity="info")
+        result = validate_text(text, min_issue_severity="info", enable_ai=False)
         assert isinstance(result["issues"], list)
 
     def test_very_long_text(self):
         text = "This is a sentence. " * 500
-        result = validate_text(text)
+        result = validate_text(text, enable_ai=False)
         assert isinstance(result["issues"], list)

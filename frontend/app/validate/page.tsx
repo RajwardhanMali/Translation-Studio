@@ -22,17 +22,20 @@ import {
 import { cn } from '@/lib/utils'
 
 function SeverityBadge({ severity }: { severity: ValidationIssue['severity'] }) {
+  const isError = severity === 'error'
   const isWarning = severity === 'warning'
   return (
     <span
       className={cn(
         'inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide',
-        isWarning
+        isError
+          ? 'border-red-200 bg-red-50 text-red-700 dark:border-red-800/60 dark:bg-red-950/40 dark:text-red-200'
+          : isWarning
           ? 'border-amber-200 bg-amber-50 text-amber-700 dark:border-amber-800/60 dark:bg-amber-950/40 dark:text-amber-200'
           : 'border-sky-200 bg-sky-50 text-sky-700 dark:border-sky-800/60 dark:bg-sky-950/40 dark:text-sky-200'
       )}
     >
-      {isWarning ? <AlertTriangle className="h-2.5 w-2.5" /> : <Info className="h-2.5 w-2.5" />}
+      {isError ? <AlertTriangle className="h-2.5 w-2.5" /> : isWarning ? <AlertTriangle className="h-2.5 w-2.5" /> : <Info className="h-2.5 w-2.5" />}
       {severity}
     </span>
   )
@@ -55,8 +58,9 @@ function ValidationCard({
 }) {
   const [expanded, setExpanded] = useState(true)
   const [manualDraft, setManualDraft] = useState(result.auto_fixed_text ?? result.text ?? '')
-  const visibleIssues = showInfo ? result.issues : result.issues.filter((issue) => issue.severity === 'warning')
+  const visibleIssues = showInfo ? result.issues : result.issues.filter((issue) => issue.severity === 'warning' || issue.severity === 'error')
   const hiddenInfoCount = result.issues.length - visibleIssues.length
+  const hasError = visibleIssues.some((issue) => issue.severity === 'error')
   const hasWarning = visibleIssues.some((issue) => issue.severity === 'warning')
 
   useEffect(() => {
@@ -69,8 +73,12 @@ function ValidationCard({
         className="flex w-full items-start gap-3 px-4 py-4 text-left transition-colors hover:bg-muted/30"
         onClick={() => setExpanded((value) => !value)}
       >
-        <div className={cn('mt-0.5 rounded-full p-1', hasWarning ? 'bg-amber-100 text-amber-700 dark:bg-amber-950/40 dark:text-amber-200' : 'bg-sky-100 text-sky-700 dark:bg-sky-950/40 dark:text-sky-200')}>
-          {hasWarning ? <AlertTriangle className="h-3.5 w-3.5" /> : <Info className="h-3.5 w-3.5" />}
+        <div className={cn('mt-0.5 rounded-full p-1', 
+          hasError ? 'bg-red-100 text-red-700 dark:bg-red-950/40 dark:text-red-200' :
+          hasWarning ? 'bg-amber-100 text-amber-700 dark:bg-amber-950/40 dark:text-amber-200' : 
+          'bg-sky-100 text-sky-700 dark:bg-sky-950/40 dark:text-sky-200'
+        )}>
+          {hasError ? <AlertTriangle className="h-3.5 w-3.5" /> : hasWarning ? <AlertTriangle className="h-3.5 w-3.5" /> : <Info className="h-3.5 w-3.5" />}
         </div>
 
         <div className="min-w-0 flex-1">
@@ -229,7 +237,7 @@ function ValidationPageContent() {
 
   const visibleResults = useMemo(() => {
     if (showInfo) return results
-    return results.filter((result) => result.issues.some((issue) => issue.severity === 'warning'))
+    return results.filter((result) => result.issues.some((issue) => issue.severity === 'warning' || issue.severity === 'error'))
   }, [results, showInfo])
 
   const handleApplyAiFix = async (result: ValidationResult) => {
@@ -301,10 +309,10 @@ function ValidationPageContent() {
 
         <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
           {[
-            { label: 'Segments with issues', value: results.length, icon: ShieldCheck },
-            { label: 'Errors', value: counts.error, icon: AlertTriangle },
-            { label: 'Warnings', value: counts.warning, icon: AlertTriangle },
-            { label: 'Info', value: counts.info, icon: Info },
+            { label: 'Segments with issues', value: results.length, icon: ShieldCheck, borderColor: 'border-border/70' },
+            { label: 'Errors', value: counts.error, icon: AlertTriangle, borderColor: 'border-red-200 dark:border-red-800/60' },
+            { label: 'Warnings', value: counts.warning, icon: AlertTriangle, borderColor: 'border-amber-200 dark:border-amber-800/60' },
+            { label: 'Info', value: counts.info, icon: Info, borderColor: 'border-sky-200 dark:border-sky-800/60' },
           ].map((item, index) => (
             <motion.div
               key={item.label}
@@ -313,7 +321,7 @@ function ValidationPageContent() {
               viewport={{ once: true, amount: 0.25 }}
               transition={{ duration: 0.45, delay: index * 0.07, ease: [0.22, 1, 0.36, 1] }}
             >
-            <Card className="rounded-2xl border-border/70 p-4">
+            <Card className={cn("rounded-2xl border p-4", item.borderColor)}>
               <div className="flex items-center gap-3">
                 <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-muted">
                   <item.icon className="h-4 w-4 text-foreground" />
