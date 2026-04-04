@@ -12,7 +12,13 @@ import { Card } from '@/components/ui/card'
 import { Spinner } from '@/components/ui/spinner'
 import { Textarea } from '@/components/ui/textarea'
 import { useToast } from '@/hooks/use-toast'
-import { approveSegment, validateDocument, type ValidationIssue, type ValidationResult } from '@/lib/api'
+import {
+  applyValidationFixes,
+  editValidationSegment,
+  validateDocument,
+  type ValidationIssue,
+  type ValidationResult,
+} from '@/lib/api'
 import { cn } from '@/lib/utils'
 
 function SeverityBadge({ severity }: { severity: ValidationIssue['severity'] }) {
@@ -35,23 +41,27 @@ function SeverityBadge({ severity }: { severity: ValidationIssue['severity'] }) 
 function ValidationCard({
   result,
   showInfo,
-  onApplyFix,
-  applying,
+  onApplyAiFix,
+  onApplyManualEdit,
+  applyingAi,
+  applyingManual,
 }: {
   result: ValidationResult
   showInfo: boolean
-  onApplyFix: (nextText: string) => Promise<void>
-  applying: boolean
+  onApplyAiFix: () => Promise<void>
+  onApplyManualEdit: (nextText: string) => Promise<void>
+  applyingAi: boolean
+  applyingManual: boolean
 }) {
   const [expanded, setExpanded] = useState(true)
-  const [draftCorrection, setDraftCorrection] = useState(result.auto_fixed_text ?? '')
+  const [manualDraft, setManualDraft] = useState(result.auto_fixed_text ?? result.text ?? '')
   const visibleIssues = showInfo ? result.issues : result.issues.filter((issue) => issue.severity === 'warning')
   const hiddenInfoCount = result.issues.length - visibleIssues.length
   const hasWarning = visibleIssues.some((issue) => issue.severity === 'warning')
 
   useEffect(() => {
-    setDraftCorrection(result.auto_fixed_text ?? '')
-  }, [result.auto_fixed_text])
+    setManualDraft(result.auto_fixed_text ?? result.text ?? '')
+  }, [result.auto_fixed_text, result.text])
 
   return (
     <HoverCard layout className="overflow-hidden rounded-2xl border border-border/70 bg-card">
@@ -104,21 +114,52 @@ function ValidationCard({
             </div>
           ))}
 
-          {result.auto_fixed_text && result.segment_id && (
-            <div className="rounded-2xl border border-border/60 bg-background/70 p-3">
-              <div className="min-w-0">
-                <p className="text-xs font-medium text-foreground">Suggested correction</p>
-                <Textarea
-                  value={draftCorrection}
-                  onChange={(event) => setDraftCorrection(event.target.value)}
-                  className="mt-3 min-h-24 rounded-2xl border-border/70 bg-background/90 text-sm leading-7"
-                />
-              </div>
-              <div className="mt-3 flex justify-end">
-                <Button size="sm" variant="outline" className="rounded-xl" onClick={() => void onApplyFix(draftCorrection)} disabled={applying || !draftCorrection.trim()}>
-                  {applying ? <Spinner className="mr-1.5 h-3.5 w-3.5" /> : <Wand2 className="mr-1.5 h-3.5 w-3.5" />}
-                  Apply
-                </Button>
+          {result.segment_id && (
+            <div className={cn('grid gap-3', result.auto_fixed_text ? 'xl:grid-cols-2' : undefined)}>
+              {result.auto_fixed_text ? (
+                <div className="rounded-2xl border border-border/60 bg-background/70 p-3">
+                  <div className="min-w-0">
+                    <p className="text-xs font-medium text-foreground">AI suggested correction</p>
+                    <div className="mt-3 rounded-2xl border border-border/60 bg-background/90 px-4 py-3 text-sm leading-7 text-foreground">
+                      {result.auto_fixed_text}
+                    </div>
+                  </div>
+                  <div className="mt-3 flex justify-end">
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="rounded-xl"
+                      onClick={() => void onApplyAiFix()}
+                      disabled={applyingAi}
+                    >
+                      {applyingAi ? <Spinner className="mr-1.5 h-3.5 w-3.5" /> : <Wand2 className="mr-1.5 h-3.5 w-3.5" />}
+                      Apply AI fix
+                    </Button>
+                  </div>
+                </div>
+              ) : null}
+
+              <div className="rounded-2xl border border-border/60 bg-background/70 p-3">
+                <div className="min-w-0">
+                  <p className="text-xs font-medium text-foreground">Manual correction</p>
+                  <Textarea
+                    value={manualDraft}
+                    onChange={(event) => setManualDraft(event.target.value)}
+                    className="mt-3 min-h-24 rounded-2xl border-border/70 bg-background/90 text-sm leading-7"
+                  />
+                </div>
+                <div className="mt-3 flex justify-end">
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="rounded-xl"
+                    onClick={() => void onApplyManualEdit(manualDraft)}
+                    disabled={applyingManual || !manualDraft.trim()}
+                  >
+                    {applyingManual ? <Spinner className="mr-1.5 h-3.5 w-3.5" /> : null}
+                    Save manual edit
+                  </Button>
+                </div>
               </div>
             </div>
           )}
@@ -138,7 +179,8 @@ function ValidationPageContent() {
   const [results, setResults] = useState<ValidationResult[]>([])
   const [hasLoaded, setHasLoaded] = useState(false)
   const [showInfo, setShowInfo] = useState(false)
-  const [applyingId, setApplyingId] = useState<string | null>(null)
+  const [applyingAiId, setApplyingAiId] = useState<string | null>(null)
+  const [manualEditId, setManualEditId] = useState<string | null>(null)
 
   const loadValidation = async (autoFix = true) => {
     setLoading(true)
@@ -190,31 +232,53 @@ function ValidationPageContent() {
     return results.filter((result) => result.issues.some((issue) => issue.severity === 'warning'))
   }, [results, showInfo])
 
-  const handleApplyFix = async (result: ValidationResult, nextText: string) => {
-    const trimmedText = nextText.trim()
-    if (!result.segment_id || !trimmedText) return
+  const handleApplyAiFix = async (result: ValidationResult) => {
+    if (!docId || !result.segment_id) return
 
-    setApplyingId(result.segment_id)
+    setApplyingAiId(result.segment_id)
     try {
-      await approveSegment(result.segment_id, false, trimmedText)
+      const response = await applyValidationFixes(docId, [result.segment_id])
       setResults((prev) =>
-        prev
-          .map((item) =>
-            item.segment_id === result.segment_id
-              ? { ...item, text: trimmedText, auto_fixed_text: trimmedText, issues: [], has_errors: false, has_warnings: false }
-              : item
-          )
-          .filter((item) => item.issues.length > 0)
+        prev.filter((item) => !response.fixes.some((fix) => fix.segment_id === item.segment_id))
       )
-      toast({ title: 'Fix applied', description: 'The correction was sent back to the document.' })
+      const appliedFix = response.fixes.find((fix) => fix.segment_id === result.segment_id)
+      toast({
+        title: 'AI fix applied',
+        description: appliedFix
+          ? `${appliedFix.issues_fixed} issue${appliedFix.issues_fixed === 1 ? '' : 's'} resolved.`
+          : 'The AI suggestion was written back to the source.',
+      })
     } catch {
       toast({
-        title: 'Could not apply fix',
-        description: 'The correction could not be saved to the backend.',
+        title: 'Could not apply AI fix',
+        description: 'The AI suggestion could not be saved to the backend.',
         variant: 'destructive',
       })
     } finally {
-      setApplyingId(null)
+      setApplyingAiId(null)
+    }
+  }
+
+  const handleManualEdit = async (result: ValidationResult, nextText: string) => {
+    const trimmedText = nextText.trim()
+    if (!docId || !result.segment_id || !trimmedText) return
+
+    setManualEditId(result.segment_id)
+    try {
+      await editValidationSegment(docId, result.segment_id, trimmedText)
+      setResults((prev) => prev.filter((item) => item.segment_id !== result.segment_id))
+      toast({
+        title: 'Manual edit saved',
+        description: 'The segment source text was updated and persisted.',
+      })
+    } catch {
+      toast({
+        title: 'Could not save manual edit',
+        description: 'The manual correction could not be saved to the backend.',
+        variant: 'destructive',
+      })
+    } finally {
+      setManualEditId(null)
     }
   }
 
@@ -306,8 +370,10 @@ function ValidationPageContent() {
                     <ValidationCard
                       result={result}
                       showInfo={showInfo}
-                      onApplyFix={(nextText) => handleApplyFix(result, nextText)}
-                      applying={applyingId === result.segment_id}
+                      onApplyAiFix={() => handleApplyAiFix(result)}
+                      onApplyManualEdit={(nextText) => handleManualEdit(result, nextText)}
+                      applyingAi={applyingAiId === result.segment_id}
+                      applyingManual={manualEditId === result.segment_id}
                     />
                   </motion.div>
                 ))}
