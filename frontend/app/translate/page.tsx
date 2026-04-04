@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, Suspense } from "react";
+import { memo, Suspense, useEffect, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import { useSearchParams, useRouter } from "next/navigation";
 import {
@@ -277,7 +277,10 @@ interface SegmentRowProps {
   retrying: boolean;
 }
 
-function SegmentRow({
+const INITIAL_SEGMENT_BATCH = 24;
+const SEGMENT_BATCH_SIZE = 16;
+
+const SegmentRow = memo(function SegmentRow({
   segment,
   selected,
   onSelect,
@@ -359,6 +362,10 @@ function SegmentRow({
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.35, ease: [0.22, 1, 0.36, 1] }}
       whileHover={{ y: -3 }}
+      style={{
+        contentVisibility: "auto",
+        containIntrinsicSize: "420px",
+      }}
       className={cn(
         "relative overflow-hidden rounded-[1.6rem] border border-border/70 bg-card/90 shadow-[0_18px_50px_-34px_rgba(15,23,42,0.45)] transition-all duration-200 before:absolute before:inset-y-0 before:left-0 before:w-1.5",
         statusAccentMap[segment.status] ?? "before:bg-border",
@@ -620,7 +627,12 @@ function SegmentRow({
         )}
     </motion.div>
   );
-}
+},
+(prevProps, nextProps) =>
+  prevProps.segment === nextProps.segment &&
+  prevProps.selected === nextProps.selected &&
+  prevProps.retrying === nextProps.retrying,
+);
 
 function TranslatePageContent() {
   const searchParams = useSearchParams();
@@ -647,12 +659,14 @@ function TranslatePageContent() {
   });
   const [exportFormat, setExportFormat] = useState<ExportFormat>("same");
   const [exporting, setExporting] = useState(false);
+  const [visibleCount, setVisibleCount] = useState(INITIAL_SEGMENT_BATCH);
   const [sourceOverrides, setSourceOverrides] = useState<
     Record<string, string>
   >({});
   const [outputOverrides, setOutputOverrides] = useState<
     Record<string, string>
   >({});
+  const loadMoreRef = useRef<HTMLDivElement | null>(null);
 
   const selectableIds = segments.map((segment) => segment.segment_id);
   const allSelected =
@@ -722,6 +736,34 @@ function TranslatePageContent() {
   useEffect(() => {
     void loadSegments(statusFilter);
   }, [docId, outputOverrides, sourceOverrides, statusFilter]);
+
+  useEffect(() => {
+    setVisibleCount(INITIAL_SEGMENT_BATCH);
+  }, [docId, statusFilter, segments.length]);
+
+  useEffect(() => {
+    if (visibleCount >= segments.length) return;
+
+    const node = loadMoreRef.current;
+    if (!node) return;
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        const entry = entries[0];
+        if (entry?.isIntersecting) {
+          setVisibleCount((current) =>
+            Math.min(current + SEGMENT_BATCH_SIZE, segments.length),
+          );
+        }
+      },
+      {
+        rootMargin: "800px 0px",
+      },
+    );
+
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [segments.length, visibleCount]);
 
   useEffect(() => {
     if (!docId) {
@@ -1013,6 +1055,8 @@ function TranslatePageContent() {
     docId && shareOverview.ownedByDocument[docId]
       ? shareOverview.ownedByDocument[docId].recipients
       : [];
+  const visibleSegments = segments.slice(0, visibleCount);
+  const hasMoreSegments = visibleCount < segments.length;
   const recipientOffsets = [
     "left-[10%] top-[14%]",
     "left-[36%] top-[38%]",
@@ -1471,7 +1515,7 @@ function TranslatePageContent() {
         ) : (
           <motion.section layout className="space-y-4 overflow-hidden">
             <AnimatePresence mode="popLayout">
-              {segments.map((segment, index) => (
+              {visibleSegments.map((segment, index) => (
                 <SegmentRow
                   key={`${segment.segment_id}-${index}`}
                   segment={segment}
@@ -1485,6 +1529,17 @@ function TranslatePageContent() {
                 />
               ))}
             </AnimatePresence>
+            {hasMoreSegments ? (
+              <div
+                ref={loadMoreRef}
+                className="glass-panel flex items-center justify-between rounded-[1.4rem] border border-dashed border-border/70 px-4 py-3 text-sm text-muted-foreground"
+              >
+                <span>
+                  Rendering {visibleSegments.length} of {segments.length} segments
+                </span>
+                <Spinner className="h-4 w-4 text-primary" />
+              </div>
+            ) : null}
           </motion.section>
         )}
       </div>
