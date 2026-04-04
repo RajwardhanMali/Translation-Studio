@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { AnimatePresence, motion } from 'framer-motion'
-import { ArrowRight, File, FileText, FolderOpen, LayoutGrid, Link2, List, Loader2, RefreshCw, Sparkles, Trash2 } from 'lucide-react'
+import { ArrowRight, CheckCircle2, Clock, File, FileCode, FileText, FolderOpen, LayoutGrid, Link2, List, Loader2, RefreshCw, Search, SearchX, Sparkles, Trash2, TrendingUp, X } from 'lucide-react'
 import {
   AlertDialog,
   AlertDialogAction,
@@ -25,6 +25,8 @@ import { Button } from '@/components/ui/button'
 import { Spinner } from '@/components/ui/spinner'
 import { useToast } from '@/hooks/use-toast'
 import { Card } from '@/components/ui/card'
+import { Input } from '@/components/ui/input'
+import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
 
 function formatRelativeTime(value: string) {
   const target = new Date(value).getTime()
@@ -315,6 +317,8 @@ export default function DocumentsPage() {
   const [viewMode, setViewMode] = useState<'grid' | 'list'>('grid')
   const [refreshing, setRefreshing] = useState(false)
   const [deletingId, setDeletingId] = useState<string | null>(null)
+  const [searchQuery, setSearchQuery] = useState('')
+  const [activeTab, setActiveTab] = useState<'all' | 'personal' | 'shared'>('all')
 
   const handleRefresh = async () => {
     setRefreshing(true)
@@ -333,12 +337,24 @@ export default function DocumentsPage() {
           acc.pending += doc.segments.pending
           acc.reviewed += doc.segments.reviewed
           acc.approved += doc.segments.approved
+          acc.totalProgress += doc.translation_progress
           return acc
         },
-        { total: 0, pending: 0, reviewed: 0, approved: 0 }
+        { total: 0, pending: 0, reviewed: 0, approved: 0, totalProgress: 0 }
       ),
     [documents]
   )
+
+  const filteredDocuments = useMemo(() => {
+    return documents.filter((doc) => {
+      const matchesSearch = doc.filename.toLowerCase().includes(searchQuery.toLowerCase())
+      const isReceived = shareOverview.receivedDocumentIds.includes(doc.id)
+      
+      if (activeTab === 'personal') return matchesSearch && !isReceived
+      if (activeTab === 'shared') return matchesSearch && isReceived
+      return matchesSearch
+    })
+  }, [documents, searchQuery, activeTab, shareOverview.receivedDocumentIds])
 
   const handleDelete = async (id: string) => {
     setDeletingId(id)
@@ -382,80 +398,154 @@ export default function DocumentsPage() {
         subtitle="Browse uploaded files, track progress, and reopen any document."
       />
       <div className="space-y-5">
-        <Reveal className="hero-sheen overflow-hidden rounded-[2rem] border border-border/70">
-          <div className="grid gap-6 px-6 py-7 lg:grid-cols-[1.2fr_0.8fr] lg:px-8">
+      <div className="relative space-y-7">
+        {/* Visual Polish: Background Spotlight */}
+        <div className="pointer-events-none absolute -top-24 left-1/2 -z-10 h-[600px] w-[1000px] -translate-x-1/2 opacity-25 blur-[140px] dark:opacity-15">
+          <div className="h-full w-full bg-gradient-to-br from-primary/30 via-purple-500/20 to-blue-600/30" />
+        </div>
+
+        {/* Hero Section with Integrated Stats */}
+        <Reveal className="hero-sheen overflow-hidden rounded-[2.5rem] border border-border/60 bg-background/20 backdrop-blur-sm">
+          <div className="grid gap-8 px-6 py-8 lg:grid-cols-[1.1fr_0.9fr] lg:px-10 lg:py-10">
             <div>
-              <p className="text-xs font-semibold uppercase tracking-[0.22em] text-primary">Document operations</p>
-              <h2 className="mt-3 text-3xl font-semibold tracking-tight text-foreground md:text-4xl">
-                Your active translation pipeline, ready to reopen, review, and share.
+              <div className="flex items-center gap-2">
+                <Badge variant="outline" className="rounded-full border-primary/30 bg-primary/5 px-3 py-1 text-[10px] font-bold uppercase tracking-widest text-primary">
+                  Dashboard
+                </Badge>
+                <div className="h-px w-8 bg-border/60" />
+                <span className="text-[10px] font-medium uppercase tracking-widest text-muted-foreground/60">Document Hub</span>
+              </div>
+              <h2 className="mt-6 text-4xl font-bold tracking-tight text-foreground md:text-5xl lg:text-6xl">
+                Ready to <span className="text-primary italic">translate</span> & collaborate?
               </h2>
-              <p className="mt-3 max-w-2xl text-sm leading-7 text-muted-foreground md:text-base">
-                Monitor progress across uploaded files, jump back into translation, and generate secure share links
-                when reviewers need access to the same document context.
+              <p className="mt-6 max-w-xl text-sm leading-8 text-muted-foreground md:text-lg">
+                Manage your translation pipeline with ease. Track progress across files, 
+                generate secure share links, and jump back into your work instantly.
               </p>
+              
+              <div className="mt-10 flex flex-wrap gap-4">
+                <Button className="h-12 rounded-2xl bg-primary px-8 text-base font-semibold shadow-lg shadow-primary/20 hover:shadow-primary/30" onClick={() => router.push('/upload')}>
+                  <Sparkles className="mr-2 h-5 w-5" />
+                  New Project
+                </Button>
+                <Button variant="outline" className="glass-panel h-12 rounded-2xl border-border/50 bg-background/40 px-6 font-medium hover:bg-accent/50" onClick={handleRefresh} disabled={refreshing}>
+                  <RefreshCw className={cn('mr-2 h-4 w-4', refreshing && 'animate-spin')} />
+                  Refresh Library
+                </Button>
+              </div>
             </div>
 
-            <Card className="motion-card motion-sheen rounded-[1.75rem] border-border/60 bg-background/75 p-5">
-              <div className="flex items-center gap-3">
-                <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-primary/10 text-primary">
-                  <Sparkles className="h-5 w-5" />
-                </div>
-                <div>
-                  <p className="text-sm font-semibold text-foreground">Team-ready workflow</p>
-                  <p className="text-sm text-muted-foreground">Share links route collaborators into the right file after login.</p>
+            <Card className="motion-card motion-sheen relative overflow-hidden rounded-[2.25rem] border-border/40 bg-gradient-to-br from-background/90 to-background/50 p-6 shadow-2xl md:p-8">
+              <div className="relative z-10 grid h-full grid-cols-2 gap-4">
+                {[
+                  { label: 'Documents', value: totals.total, icon: FileCode, color: 'text-primary' },
+                  { label: 'Pending', value: totals.pending, icon: Clock, color: 'text-slate-500' },
+                  { label: 'Reviewed', value: totals.reviewed, icon: TrendingUp, color: 'text-amber-500' },
+                  { label: 'Approved', value: totals.approved, icon: CheckCircle2, color: 'text-emerald-500' },
+                ].map((stat) => (
+                  <div key={stat.label} className="flex flex-col justify-between rounded-[1.5rem] bg-muted/40 p-4 transition-colors hover:bg-muted/60">
+                    <div className={cn("flex h-9 w-9 items-center justify-center rounded-xl bg-background/80 shadow-sm", stat.color)}>
+                      <stat.icon className="h-4.5 w-4.5" />
+                    </div>
+                    <div className="mt-3">
+                      <p className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground/60">{stat.label}</p>
+                      <p className="mt-0.5 text-2xl font-bold tracking-tight text-foreground">{stat.value}</p>
+                    </div>
+                  </div>
+                ))}
+                
+                <div className="col-span-2 mt-2 flex flex-col justify-end rounded-[1.5rem] bg-primary/5 p-4 border border-primary/10">
+                  <div className="flex items-center justify-between text-[11px] font-bold uppercase tracking-widest text-primary">
+                    <span>Overall Progress</span>
+                    <span>{totals.total > 0 ? Math.round(totals.totalProgress / totals.total) : 0}%</span>
+                  </div>
+                  <div className="mt-3 h-2 overflow-hidden rounded-full bg-primary/10">
+                    <div 
+                      className="h-full bg-primary shadow-[0_0_20px_rgba(var(--primary),0.5)] transition-all duration-1000 ease-out" 
+                      style={{ width: `${totals.total > 0 ? totals.totalProgress / totals.total : 0}%` }} 
+                    />
+                  </div>
                 </div>
               </div>
-              <div className="mt-4 flex flex-wrap gap-2">
-                <div className="flex items-center gap-1 rounded-2xl border border-white/20 bg-white/5 p-1">
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    className={cn('h-8 w-8 rounded-xl p-0', viewMode === 'grid' && 'bg-primary text-primary-foreground')}
-                    onClick={() => setViewMode('grid')}
-                  >
-                    <LayoutGrid className="h-4 w-4" />
-                  </Button>
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    className={cn('h-8 w-8 rounded-xl p-0', viewMode === 'list' && 'bg-primary text-primary-foreground')}
-                    onClick={() => setViewMode('list')}
-                  >
-                    <List className="h-4 w-4" />
-                  </Button>
-                </div>
-                <Button variant="outline" className="rounded-2xl" onClick={handleRefresh} disabled={refreshing}>
-                  <RefreshCw className={cn('mr-2 h-4 w-4', refreshing && 'animate-spin')} />
-                  Refresh
-                </Button>
-                <Button className="rounded-2xl" onClick={() => router.push('/upload')}>
-                  Upload Document
-                </Button>
-              </div>
+              
+              {/* Subtle background decoration for the stats card */}
+              <div className="absolute -right-4 -top-4 -z-0 h-32 w-32 rounded-full bg-primary/10 blur-3xl" />
+              <div className="absolute -bottom-4 -left-4 -z-0 h-32 w-32 rounded-full bg-purple-500/10 blur-3xl" />
             </Card>
           </div>
         </Reveal>
 
-        <div className="grid gap-4 md:grid-cols-4">
-          {[
-            { label: 'Documents', value: totals.total },
-            { label: 'Pending', value: totals.pending },
-            { label: 'Reviewed', value: totals.reviewed },
-            { label: 'Approved', value: totals.approved },
-          ].map((item, index) => (
-            <motion.div
-              key={item.label}
-              initial={{ opacity: 0, y: 18 }}
-              whileInView={{ opacity: 1, y: 0 }}
-              viewport={{ once: true, amount: 0.25 }}
-              transition={{ duration: 0.45, delay: index * 0.07, ease: [0.22, 1, 0.36, 1] }}
+        {/* Global Controls & Filtering */}
+        <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between lg:mt-4">
+          <div className="flex flex-1 items-center gap-4">
+            <Tabs 
+              value={activeTab} 
+              onValueChange={(v) => setActiveTab(v as any)} 
+              className="w-fit"
             >
-            <Card className={cn('rounded-2xl border-border/70 p-4')}>
-              <p className="text-xs uppercase tracking-[0.18em] text-muted-foreground">{item.label}</p>
-              <p className="mt-2 text-2xl font-semibold text-foreground">{item.value}</p>
-            </Card>
-            </motion.div>
-          ))}
+              <TabsList className="glass-panel h-12 rounded-2xl border-border/50 bg-background/50 p-1 backdrop-blur-md">
+                <TabsTrigger value="all" className="rounded-xl px-5 text-xs font-semibold tracking-wide data-[state=active]:bg-primary data-[state=active]:text-primary-foreground data-[state=active]:shadow-lg">
+                  All Files <span className="ml-2 opacity-60 text-[10px]">{documents.length}</span>
+                </TabsTrigger>
+                <TabsTrigger value="personal" className="rounded-xl px-5 text-xs font-semibold tracking-wide data-[state=active]:bg-primary data-[state=active]:text-primary-foreground data-[state=active]:shadow-lg">
+                  Personal
+                </TabsTrigger>
+                <TabsTrigger value="shared" className="rounded-xl px-5 text-xs font-semibold tracking-wide data-[state=active]:bg-primary data-[state=active]:text-primary-foreground data-[state=active]:shadow-lg">
+                  Shared
+                </TabsTrigger>
+              </TabsList>
+            </Tabs>
+            
+            <div className="relative hidden max-w-sm flex-1 md:block">
+              <Search className="absolute left-4 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground/50" />
+              <Input
+                placeholder="Find a document..."
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                className="glass-panel h-12 rounded-2xl border-border/50 bg-background/50 pl-11 pr-10 text-sm focus-visible:ring-primary/30 transition-all hover:border-primary/30"
+              />
+              {searchQuery && (
+                <button 
+                  onClick={() => setSearchQuery('')}
+                  className="absolute right-4 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground transition-colors"
+                >
+                  <X className="h-4 w-4" />
+                </button>
+              )}
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2">
+            <div className="flex items-center gap-1.5 rounded-2xl border border-border/50 bg-background/50 p-1.5 backdrop-blur-sm shadow-inner">
+              <Button
+                variant="ghost"
+                size="sm"
+                className={cn('h-9 w-10 rounded-xl p-0 transition-all', viewMode === 'grid' ? 'bg-primary text-primary-foreground shadow-md' : 'text-muted-foreground hover:text-foreground hover:bg-muted/50')}
+                onClick={() => setViewMode('grid')}
+              >
+                <LayoutGrid className="h-4.5 w-4.5" />
+              </Button>
+              <Button
+                variant="ghost"
+                size="sm"
+                className={cn('h-9 w-10 rounded-xl p-0 transition-all', viewMode === 'list' ? 'bg-primary text-primary-foreground shadow-md' : 'text-muted-foreground hover:text-foreground hover:bg-muted/50')}
+                onClick={() => setViewMode('list')}
+              >
+                <List className="h-4.5 w-4.5" />
+              </Button>
+            </div>
+          </div>
+        </div>
+
+        {/* Mobile Search Overlay */}
+        <div className="relative block md:hidden">
+          <Search className="absolute left-4 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground/60" />
+          <Input
+            placeholder="Search documents..."
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            className="glass-panel h-12 rounded-2xl border-border/50 bg-background/50 pl-11 focus-visible:ring-primary/30"
+          />
         </div>
 
         {loading ? (
@@ -476,10 +566,21 @@ export default function DocumentsPage() {
               Upload Document
             </Button>
           </Card>
+        ) : filteredDocuments.length === 0 ? (
+          <div className="glass-panel flex flex-col items-center gap-4 rounded-3xl py-24 text-center">
+            <SearchX className="h-10 w-10 text-muted-foreground/40" />
+            <div className="space-y-1">
+              <p className="text-lg font-semibold text-foreground">No matches found</p>
+              <p className="text-sm text-muted-foreground">Adjust your filters or try a different search term.</p>
+            </div>
+            <Button variant="outline" className="rounded-xl" onClick={() => { setSearchQuery(''); setActiveTab('all'); }}>
+              Clear all filters
+            </Button>
+          </div>
         ) : (
           <motion.div layout className={cn('grid gap-4', viewMode === 'grid' ? 'xl:grid-cols-3' : 'grid-cols-1')}>
             <AnimatePresence mode="popLayout">
-            {documents.map((document) => (
+            {filteredDocuments.map((document) => (
               viewMode === 'grid' ? (
                 <DocumentCard
                   key={document.id}
@@ -505,6 +606,7 @@ export default function DocumentsPage() {
             </AnimatePresence>
           </motion.div>
         )}
+      </div>
       </div>
     </>
   )
