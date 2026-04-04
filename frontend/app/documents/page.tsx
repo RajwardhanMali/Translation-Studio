@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { AnimatePresence, motion } from 'framer-motion'
-import { ArrowRight, File, FileText, FolderOpen, Link2, Loader2, RefreshCw, Sparkles, Trash2, Users } from 'lucide-react'
+import { ArrowRight, File, FileText, FolderOpen, Link2, Loader2, RefreshCw, Sparkles, Trash2 } from 'lucide-react'
 import {
   AlertDialog,
   AlertDialogAction,
@@ -24,19 +24,6 @@ import { Spinner } from '@/components/ui/spinner'
 import { useToast } from '@/hooks/use-toast'
 import { createShareLink, deleteDocument, getDocuments, getShareOverview, type DocumentSummary, type ShareOverviewResponse } from '@/lib/api'
 import { cn } from '@/lib/utils'
-
-function getLocalCustomSegmentCount(documentId: string) {
-  if (typeof window === 'undefined') return 0
-
-  try {
-    const raw = window.localStorage.getItem(`translation-studio-workspace:${documentId}`)
-    if (!raw) return 0
-    const parsed = JSON.parse(raw) as { customSegments?: unknown[] }
-    return Array.isArray(parsed.customSegments) ? parsed.customSegments.length : 0
-  } catch {
-    return 0
-  }
-}
 
 function formatRelativeTime(value: string) {
   const target = new Date(value).getTime()
@@ -111,7 +98,6 @@ function StackedProgress({ document }: { document: DocumentSummary }) {
 function DocumentCard({
   document,
   deleting,
-  shareMeta,
   received,
   onOpen,
   onDelete,
@@ -119,7 +105,6 @@ function DocumentCard({
 }: {
   document: DocumentSummary
   deleting: boolean
-  shareMeta?: ShareOverviewResponse['ownedByDocument'][string]
   received: boolean
   onOpen: () => void
   onDelete: () => Promise<void>
@@ -169,26 +154,6 @@ function DocumentCard({
           <div className="rounded-2xl bg-muted/70 px-3 py-2 text-muted-foreground">Reviewed {document.segments.reviewed}</div>
           <div className="rounded-2xl bg-muted/70 px-3 py-2 text-muted-foreground">Approved {document.segments.approved}</div>
         </div>
-
-        {shareMeta ? (
-          <div className="motion-card-subtle rounded-2xl border border-border/60 bg-background/70 p-4">
-            <div className="flex items-center gap-2">
-              <Users className="h-4 w-4 text-primary" />
-              <p className="text-xs font-semibold uppercase tracking-[0.18em] text-muted-foreground">Shared with</p>
-            </div>
-            <div className="mt-3 flex flex-wrap gap-2">
-              {shareMeta.recipients.length > 0 ? (
-                shareMeta.recipients.map((recipient) => (
-                  <Badge key={`${document.id}-${recipient.clerkUserId}`} variant="outline" className="rounded-full px-3 py-1 text-[11px]">
-                    {recipient.name || recipient.email}
-                  </Badge>
-                ))
-              ) : (
-                <span className="text-xs text-muted-foreground">No one has opened this share link yet.</span>
-              )}
-            </div>
-          </div>
-        ) : null}
 
         <div className="flex flex-wrap justify-end gap-2">
           <Button variant="outline" className="rounded-xl" onClick={() => void onShare()}>
@@ -245,7 +210,6 @@ export default function DocumentsPage() {
     ownedByDocument: {},
     receivedDocumentIds: [],
   })
-  const [customSegmentCounts, setCustomSegmentCounts] = useState<Record<string, number>>({})
 
   const loadDocuments = async (silent = false) => {
     if (silent) setRefreshing(true)
@@ -283,41 +247,9 @@ export default function DocumentsPage() {
     return () => window.clearInterval(interval)
   }, [])
 
-  useEffect(() => {
-    const counts = documents.reduce<Record<string, number>>((acc, document) => {
-      acc[document.id] = getLocalCustomSegmentCount(document.id)
-      return acc
-    }, {})
-
-    setCustomSegmentCounts(counts)
-  }, [documents])
-
-  const displayDocuments = useMemo(
-    () =>
-      documents.map((document) => {
-        const customCount = customSegmentCounts[document.id] ?? 0
-        if (!customCount) return document
-
-        const total = document.segments.total + customCount
-        const pending = document.segments.pending + customCount
-        const translated = document.segments.reviewed + document.segments.approved
-
-        return {
-          ...document,
-          segments: {
-            ...document.segments,
-            total,
-            pending,
-          },
-          translation_progress: total ? (translated / total) * 100 : document.translation_progress,
-        }
-      }),
-    [customSegmentCounts, documents]
-  )
-
   const totals = useMemo(
     () =>
-      displayDocuments.reduce(
+      documents.reduce(
         (acc, doc) => {
           acc.total += 1
           acc.pending += doc.segments.pending
@@ -327,7 +259,7 @@ export default function DocumentsPage() {
         },
         { total: 0, pending: 0, reviewed: 0, approved: 0 }
       ),
-    [displayDocuments]
+    [documents]
   )
 
   const handleDelete = async (id: string) => {
@@ -434,7 +366,7 @@ export default function DocumentsPage() {
             <Spinner className="h-8 w-8 text-primary" />
             <p className="text-sm text-muted-foreground">Loading documents...</p>
           </div>
-        ) : displayDocuments.length === 0 ? (
+        ) : documents.length === 0 ? (
           <Card className="glass-panel flex flex-col items-center gap-4 rounded-3xl py-20 text-center">
             <div className="flex h-16 w-16 items-center justify-center rounded-3xl bg-muted">
               <FolderOpen className="h-8 w-8 text-muted-foreground" />
@@ -448,14 +380,13 @@ export default function DocumentsPage() {
             </Button>
           </Card>
         ) : (
-          <motion.div layout className="grid gap-4 xl:grid-cols-2">
+          <motion.div layout className="grid gap-4 xl:grid-cols-3">
             <AnimatePresence mode="popLayout">
-            {displayDocuments.map((document) => (
+            {documents.map((document) => (
               <DocumentCard
                 key={document.id}
                 document={document}
                 deleting={deletingId === document.id}
-                shareMeta={shareOverview.ownedByDocument[document.id]}
                 received={shareOverview.receivedDocumentIds.includes(document.id)}
                 onOpen={() => router.push(`/translate?doc=${document.id}`)}
                 onDelete={() => handleDelete(document.id)}
