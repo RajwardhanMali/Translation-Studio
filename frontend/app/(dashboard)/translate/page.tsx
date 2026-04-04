@@ -22,7 +22,8 @@ import {
   WandSparkles,
   X,
 } from "lucide-react";
-import { AppShell } from "@/components/app-shell";
+import { LayoutHeader } from "@/components/layout-context";
+import { useShareOverview } from "@/hooks/use-dashboard-data";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -700,11 +701,7 @@ function TranslatePageContent() {
   const [exportStatus, setExportStatus] = useState<ExportStatusResponse | null>(
     null,
   );
-  const [shareOverview, setShareOverview] = useState<ShareOverviewResponse>({
-    ownedByDocument: {},
-    visibleByDocument: {},
-    receivedDocumentIds: [],
-  });
+  const { shareOverview } = useShareOverview();
   const [exportFormat, setExportFormat] = useState<ExportFormat>("same");
   const [exporting, setExporting] = useState(false);
   const [visibleCount, setVisibleCount] = useState(INITIAL_SEGMENT_BATCH);
@@ -724,6 +721,14 @@ function TranslatePageContent() {
     Record<string, string>
   >({});
   const loadMoreRef = useRef<HTMLDivElement | null>(null);
+  // Keep a ref to the current targetLang so memoized SegmentRow callbacks
+  // always read the latest value (avoids stale closure in handleRetry).
+  
+  const targetLangRef = useRef(targetLang);
+  useEffect(() => {
+    targetLangRef.current = targetLang;
+  }, [targetLang]);
+
   const filteredSegments = useMemo(() => {
     const query = searchQuery.trim().toLowerCase();
     if (!query) return segments;
@@ -877,26 +882,6 @@ function TranslatePageContent() {
       .catch(() => setExportStatus(null));
   }, [docId, segments]);
 
-  useEffect(() => {
-    if (!docId) {
-      setShareOverview({
-        ownedByDocument: {},
-        visibleByDocument: {},
-        receivedDocumentIds: [],
-      });
-      return;
-    }
-
-    getShareOverview()
-      .then((data) => setShareOverview(data))
-      .catch(() =>
-        setShareOverview({
-          ownedByDocument: {},
-          visibleByDocument: {},
-          receivedDocumentIds: [],
-        }),
-      );
-  }, [docId]);
 
   const refreshSingleSegment = async (segmentId: string) => {
     const refreshed = (await getSegments(docId, getStatusParam(statusFilter)))
@@ -986,7 +971,7 @@ function TranslatePageContent() {
 
     setRetryingId(segment.segment_id);
     try {
-      await translateDocument(docId, targetLang, [], [segment.segment_id]);
+      await translateDocument(docId, targetLangRef.current, [], [segment.segment_id]);
       await refreshSingleSegment(segment.segment_id);
       const exportData = await getExportStatus(docId).catch(() => null);
       setExportStatus(exportData);
@@ -1254,14 +1239,11 @@ function TranslatePageContent() {
   ];
 
   return (
-    <AppShell
-      title="Translation Editor"
-      subtitle={
-        docId
-          ? `Document ${docId.slice(0, 20)}...  |  ${segments.length} segments in review`
-          : "Open a document to start translating"
-      }
-    >
+    <>
+      <LayoutHeader
+        title="Translate & Review"
+        subtitle="Generate AI drafts, verify terminology, and approve final segments for export."
+      />
       <div className="space-y-6">
         <Reveal className="glass-panel hero-sheen overflow-hidden rounded-[2rem]">
           <div className="grid gap-6 px-6 py-6 lg:grid-cols-[minmax(0,1.15fr)_minmax(280px,0.85fr)] lg:px-8 lg:py-8">
@@ -2202,7 +2184,7 @@ function TranslatePageContent() {
           </>
         )}
       </div>
-    </AppShell>
+    </>
   );
 }
 

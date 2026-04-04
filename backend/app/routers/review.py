@@ -2,166 +2,133 @@
 Review router.
 GET  /segments/{doc_id}  — list all segments for a document
 POST /approve            — approve (and optionally correct) a segment
-
-Workflow: pending → reviewed → approved
-On approval, triggers continuous learning pipeline.
 """
 
 import logging
 from datetime import datetime
 from typing import List, Optional
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Depends
+from sqlalchemy.orm import Session
 
+from app.database import get_db
+from app.models.domain import Document, Segment as SegmentDB
 from app.models.schemas import Segment, ApproveRequest, ApproveResponse
-from app.utils.file_handler import (
-    load_segmented_document,
-    update_segment_in_store,
-)
 from app.services.learning import on_segment_approved
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["review"])
 
-
-# ---------------------------------------------------------------------------
-# GET /segments/{doc_id}
-# ---------------------------------------------------------------------------
-
 @router.get("/segments/{document_id}", response_model=List[Segment])
 async def get_segments(
     document_id: str,
-    status: Optional[str] = Query(
-        None,
-        description="Filter by status: pending | reviewed | approved",
-    ),
-    seg_type: Optional[str] = Query(
-        None,
-        alias="type",
-        description="Filter by type: sentence | phrase | heading | table_cell",
-    ),
+    status: Optional[str] = Query(None, description="Filter by status: pending | reviewed | approved"),
+    seg_type: Optional[str] = Query(None, alias="type", description="Filter by type"),
+    db: Session = Depends(get_db)
 ):
     """
     Retrieve all segments for a document.
-    Optionally filter by status or segment type.
     """
-    data = load_segmented_document(document_id)
-    if data is None:
-        raise HTTPException(
-            status_code=404,
-            detail=f"Document '{document_id}' not found.",
-        )
+    doc = db.query(Document).filter(Document.id == document_id).first()
+    if not doc:
+        raise HTTPException(status_code=404, detail=f"Document '{document_id}' not found.")
 
-    segments: List[dict] = data.get("segments", [])
-
+    query = db.query(SegmentDB).filter(SegmentDB.document_id == document_id)
     if status:
-        segments = [s for s in segments if s.get("status") == status]
+        query = query.filter(SegmentDB.status == status)
     if seg_type:
-        segments = [s for s in segments if s.get("type") == seg_type]
+        query = query.filter(SegmentDB.type == seg_type)
+        
+    db_segments = query.all()
+    
+    # We order by position manually if needed, or assume they are ordered
+    results = []
+    for s in db_segments:
+        results.append(Segment(
+            id=s.id,
+            document_id=s.document_id,
+            text=s.text,
+            translated_text=s.translated_text,
+            correction=s.correction,
+            final_text=s.final_text,
+            status=s.status,
+            type=s.type,
+            parent_id=s.parent_id,
+            block_type=s.block_type,
+            position=s.position,
+            format_snapshot=s.format_snapshot,
+            tm_match_type=s.tm_match_type,
+            tm_score=s.tm_score,
+            row=s.row,
+            col=s.col,
+            table_index=s.table_index,
+            row_count=s.row_count,
+            col_count=s.col_count,
+            col_widths=s.col_widths,
+            created_at=s.created_at.isoformat() if s.created_at else None,
+            updated_at=s.updated_at.isoformat() if s.updated_at else None,
+        ))
+        
+    return results
 
-    return [Segment(**s) for s in segments]
-
-
-# ---------------------------------------------------------------------------
-# POST /approve
-# ---------------------------------------------------------------------------
 
 @router.post("/approve", response_model=ApproveResponse)
-async def approve_segment(request: ApproveRequest):
+async def approve_segment(request: ApproveRequest, db: Session = Depends(get_db)):
     """
     Approve a segment.
-
-    - If `correction` is provided, it is stored in the `correction` field
-      and used as `final_text`.
-    - If no correction, `final_text = translated_text`.
-    - Status transitions:  * → approved
-    - Triggers continuous learning (FAISS update + JSONL append).
     """
-    # Load document
-    data = _find_segment_document(request.segment_id)
-    if data is None:
-        raise HTTPException(
-            status_code=404,
-            detail=f"Segment '{request.segment_id}' not found in any document.",
-        )
+    seg = db.query(SegmentDB).filter(SegmentDB.id == request.segment_id).first()
+    if not seg:
+        raise HTTPException(status_code=404, detail=f"Segment '{request.segment_id}' not found.")
 
-    doc_data, segment = data
-
-    # Determine final text
     if request.correction:
         final_text = request.correction
-    elif segment.get("correction"):
-        final_text = segment["correction"]
-    elif segment.get("translated_text"):
-        final_text = segment["translated_text"]
+    elif seg.correction:
+        final_text = seg.correction
+    elif seg.translated_text:
+        final_text = seg.translated_text
     else:
-        raise HTTPException(
-            status_code=400,
-            detail="No translated_text available. Translate the segment first.",
-        )
+        raise HTTPException(status_code=400, detail="No translated_text available. Translate first.")
 
     new_status = "approved" if request.approved else "reviewed"
+    
+    seg.correction = request.correction or seg.correction
+    seg.final_text = final_text
+    seg.status = new_status
+    seg.updated_at = datetime.utcnow()
+    
+    doc = db.query(Document).filter(Document.id == seg.document_id).first()
+    # Read the language that was actually used during translation.
+    # Never fall back to a hard-coded language — if unknown, skip TM learning.
+    target_language = ""
+    if doc and doc.metadata_json:
+        target_language = doc.metadata_json.get("target_language", "")
+    
+    db.commit()
 
-    updates = {
-        "correction": request.correction or segment.get("correction"),
-        "final_text": final_text,
-        "status":     new_status,
-        "updated_at": datetime.utcnow().isoformat(),
-    }
-
-    # Persist changes
-    success = update_segment_in_store(
-        document_id=doc_data["document_id"],
-        segment_id=request.segment_id,
-        updates=updates,
-    )
-    if not success:
-        raise HTTPException(status_code=500, detail="Failed to update segment.")
-
-    # Trigger continuous learning on approval
-    if request.approved:
-        updated_segment = {**segment, **updates}
+    if request.approved and target_language:
+        seg_dict = {
+            "id": seg.id,
+            "text": seg.text,
+            "translated_text": seg.translated_text,
+            "final_text": seg.final_text,
+            "correction": seg.correction,
+            "status": seg.status,
+            "document_id": seg.document_id,
+            "target_language": target_language,
+        }
         try:
-            on_segment_approved(
-                segment=updated_segment,
-                # Derive language from doc metadata if stored, else default "fr"
-                target_language=doc_data.get("target_language", "fr"),
-            )
+            on_segment_approved(segment=seg_dict, target_language=target_language)
         except Exception as e:
-            logger.warning(f"Learning pipeline failed (non-critical): {e}")
-
-    logger.info(
-        f"Segment {request.segment_id} → {new_status}. "
-        f"final_text: '{final_text[:50]}'"
-    )
+            logger.warning(f"Learning pipeline failed: {e}")
+    elif request.approved and not target_language:
+        logger.warning(
+            f"Skipping TM store for segment {request.segment_id}: "
+            "no target_language found in document metadata (was document translated?)"
+        )
 
     return ApproveResponse(
         segment_id=request.segment_id,
         status=new_status,
         final_text=final_text,
     )
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-def _find_segment_document(segment_id: str):
-    """
-    Search all segmented documents on disk to find the one containing segment_id.
-    Returns (doc_data_dict, segment_dict) or None.
-    """
-    from app.utils.file_handler import SEGMENTED_DIR
-    import json
-
-    for path in SEGMENTED_DIR.glob("*.json"):
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            for seg in data.get("segments", []):
-                if seg.get("id") == segment_id:
-                    return data, seg
-        except Exception as e:
-            logger.warning(f"Could not read {path}: {e}")
-
-    return None

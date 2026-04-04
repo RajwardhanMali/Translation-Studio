@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from 'react'
 import { BookOpen, Globe2, Plus, Search, Sparkles, Tag } from 'lucide-react'
-import { AppShell } from '@/components/app-shell'
+import { LayoutHeader } from '@/components/layout-context'
 import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
@@ -129,10 +129,11 @@ export default function GlossaryPage() {
   }
 
   return (
-    <AppShell
-      title="Glossary"
-      subtitle="Keep terminology and writing guidance consistent across every document review."
-    >
+    <>
+      <LayoutHeader
+        title="Glossary"
+        subtitle="Keep terminology and writing guidance consistent across every document review."
+      />
       <div className="space-y-6">
         <section className="hero-sheen overflow-hidden rounded-[2rem] border border-border/70">
           <div className="grid gap-4 px-6 py-7 lg:grid-cols-[1.2fr_0.8fr] lg:px-8">
@@ -332,6 +333,6 @@ export default function GlossaryPage() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
-    </AppShell>
+    </>
   )
 }

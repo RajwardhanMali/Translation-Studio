@@ -8,9 +8,36 @@ import logging
 import sys
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+import hashlib
+from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from starlette.middleware.base import BaseHTTPMiddleware
+
+class ETagMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        response = await call_next(request)
+        
+        # Only apply ETags to GET requests that return 200 OK and have a body
+        if request.method == "GET" and response.status_code == 200:
+            body = b""
+            async for chunk in response.body_iterator:
+                body += chunk
+            
+            etag = f'W/"{hashlib.md5(body).hexdigest()}"'
+            
+            if request.headers.get("if-none-match") == etag:
+                return Response(status_code=304)
+            
+            response.headers["ETag"] = etag
+            # Reconstruct response since we consumed the body iterator
+            return Response(
+                content=body,
+                status_code=response.status_code,
+                headers=dict(response.headers),
+                media_type=response.media_type
+            )
+        return response
 
 # ---------------------------------------------------------------------------
 # Logging configuration
@@ -66,13 +93,7 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"Encoder not pre-loaded: {e}")
 
-    # Pre-load FAISS translation memory
-    try:
-        from app.services.rag_engine import get_tm
-        get_tm()
-        logger.info("FAISS translation memory ready.")
-    except Exception as e:
-        logger.warning(f"FAISS TM not pre-loaded: {e}")
+    # Pre-load FAISS translation memory - REMOVED for Postgresql/pgvector
 
     logger.info("=== Translation Studio ready ===")
     yield
@@ -97,6 +118,7 @@ app = FastAPI(
 # CORS (permissive for MVP — restrict in production)
 # ---------------------------------------------------------------------------
 
+app.add_middleware(ETagMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],

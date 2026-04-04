@@ -4,7 +4,7 @@ import { Suspense, useEffect, useMemo, useState } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
 import { useRouter, useSearchParams } from 'next/navigation'
 import { AlertTriangle, ArrowRight, CheckCircle2, ChevronDown, ChevronUp, Info, RefreshCw, ShieldCheck, Wand2 } from 'lucide-react'
-import { AppShell } from '@/components/app-shell'
+import { LayoutHeader } from '@/components/layout-context'
 import { HoverCard, Reveal } from '@/components/motion/primitives'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -291,10 +291,11 @@ function ValidationPageContent() {
   }
 
   return (
-    <AppShell
-      title="Validation"
-      subtitle={docId ? `Document ${docId.slice(0, 20)}...` : 'Validation results'}
-    >
+    <>
+      <LayoutHeader
+        title="Validation"
+        subtitle={docId ? `Document ${docId.slice(0, 20)}...` : 'Validation results'}
+      />
       <div className="mx-auto max-w-4xl space-y-5">
         <Reveal className="flex flex-wrap justify-end gap-2">
           <Button variant="outline" size="sm" className="rounded-xl" onClick={() => void loadValidation(true)} disabled={loading}>
@@ -390,7 +391,7 @@ function ValidationPageContent() {
           </div>
         ) : null}
       </div>
-    </AppShell>
+    </>
   )
 }
 
