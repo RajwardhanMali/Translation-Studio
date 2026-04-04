@@ -105,6 +105,7 @@ class ValidationIssue(BaseModel):
     ]
     issue: str
     suggestion: str
+    span: Optional[str] = None
     severity: Literal["error", "warning", "info"]
     offset: Optional[int] = None
     length: Optional[int] = None
@@ -128,7 +129,8 @@ class ValidateRequest(BaseModel):
     document_id: Optional[str] = None
     text: Optional[str] = None
     auto_fix: bool = False
-    enable_ai: bool = False
+    enable_ai: bool = True
+    min_issue_severity: Literal["info", "warning", "error"] = "info"
 
 
 class ApplyFixesRequest(BaseModel):

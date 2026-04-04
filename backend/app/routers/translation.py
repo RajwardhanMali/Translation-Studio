@@ -68,6 +68,7 @@ async def translate_document(request: TranslateRequest):
             segments=all_segments,
             auto_fix=False,
             enable_ai=True,
+            min_issue_severity="warning",
             document_context=classification,
         )
         data["validation_results"] = validation_results

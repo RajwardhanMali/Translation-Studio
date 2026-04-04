@@ -71,6 +71,7 @@ async def validate(request: ValidateRequest):
             segments=data.get("segments", []),
             auto_fix=request.auto_fix,
             enable_ai=request.enable_ai,
+            min_issue_severity=request.min_issue_severity,
             document_context=classification if classification else None,
         )
         for r in raw_results:
@@ -89,6 +90,7 @@ async def validate(request: ValidateRequest):
             text=request.text,
             auto_fix=request.auto_fix,
             enable_ai=request.enable_ai,
+            min_issue_severity=request.min_issue_severity,
         )
         results.append(ValidationResult(
             text=r["text"],

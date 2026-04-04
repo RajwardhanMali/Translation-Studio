@@ -35,6 +35,19 @@ logger = logging.getLogger(__name__)
 # ===========================================================================
 
 _DOUBLE_SPACE_PATTERN = re.compile(r"  +")
+_TERM_PATTERN = re.compile(r"\b[A-Za-z][A-Za-z0-9-]{2,}\b")
+_SEVERITY_ORDER = {"info": 0, "warning": 1, "error": 2}
+_STOP_WORDS = {
+    "the", "and", "for", "are", "but", "not", "you", "all", "can", "has",
+    "her", "was", "one", "our", "out", "its", "his", "how", "man", "new",
+    "now", "old", "see", "way", "who", "did", "get", "got", "had", "may",
+    "say", "she", "too", "use", "also", "been", "from", "have", "into",
+    "just", "like", "make", "many", "more", "most", "much", "must", "name",
+    "only", "over", "some", "such", "take", "than", "that", "them", "then",
+    "this", "very", "when", "will", "with", "each", "what", "were", "which",
+    "their", "there", "these", "those", "about", "after", "other", "would",
+    "could", "should", "being", "first", "where", "between", "through",
+}
 
 
 def _fast_guard(text: str) -> List[Dict]:
@@ -166,6 +179,35 @@ _VALID_ISSUE_TYPES = {
 }
 
 
+def _resolve_span_position(
+    text: str,
+    span: str,
+    offset: Optional[int] = None,
+    length: Optional[int] = None,
+) -> Tuple[Optional[int], Optional[int]]:
+    """Resolve the best available position for a reported span."""
+    if not span:
+        if isinstance(offset, int) and isinstance(length, int):
+            return offset, length
+        return offset, length
+
+    span_length = len(span)
+
+    if isinstance(offset, int):
+        candidate = text[offset:offset + span_length]
+        if candidate == span:
+            return offset, span_length
+
+    found_at = text.find(span)
+    if found_at >= 0:
+        return found_at, span_length
+
+    if isinstance(offset, int) and isinstance(length, int):
+        return offset, length
+
+    return None, None
+
+
 def _parse_ai_response(raw: str) -> List[Dict]:
     """
     Parse the LLM's JSON response into a list of issue dicts.
@@ -224,12 +266,12 @@ def _normalize_issue(issue: Dict, text: str) -> Optional[Dict]:
     if not description:
         return None
 
-    # Calculate offset from span
-    offset = None
-    length = None
-    if span and span in text:
-        offset = text.find(span)
-        length = len(span)
+    offset, length = _resolve_span_position(
+        text,
+        span,
+        offset=issue.get("offset"),
+        length=issue.get("length"),
+    )
 
     try:
         confidence = float(confidence)
@@ -241,6 +283,7 @@ def _normalize_issue(issue: Dict, text: str) -> Optional[Dict]:
         "issue_type":  issue_type,
         "issue":       description,
         "suggestion":  suggestion,
+        "span":        span or None,
         "severity":    severity,
         "offset":      offset,
         "length":      length,
@@ -414,20 +457,8 @@ def _build_term_summary(segments: List[Dict]) -> Optional[str]:
     if not all_text.strip():
         return None
 
-    stop_words = {
-        "the", "and", "for", "are", "but", "not", "you", "all", "can", "has",
-        "her", "was", "one", "our", "out", "its", "his", "how", "man", "new",
-        "now", "old", "see", "way", "who", "did", "get", "got", "had", "may",
-        "say", "she", "too", "use", "also", "been", "from", "have", "into",
-        "just", "like", "make", "many", "more", "most", "much", "must", "name",
-        "only", "over", "some", "such", "take", "than", "that", "them", "then",
-        "this", "very", "when", "will", "with", "each", "what", "were", "which",
-        "their", "there", "these", "those", "about", "after", "other", "would",
-        "could", "should", "being", "first", "where", "between", "through",
-    }
-
     words = re.findall(r"\b[a-zA-Z]{3,}\b", all_text.lower())
-    words = [w for w in words if w not in stop_words and not w.isupper()]
+    words = [w for w in words if w not in _STOP_WORDS and not w.isupper()]
 
     counter = Counter(words)
     frequent = {term: count for term, count in counter.items() if count >= 2}
@@ -438,6 +469,92 @@ def _build_term_summary(segments: List[Dict]) -> Optional[str]:
     sorted_terms = sorted(frequent.items(), key=lambda x: -x[1])[:50]
     lines = [f"  {term}: {count}x" for term, count in sorted_terms]
     return "\n".join(lines)
+
+
+def _canonicalize_term(term: str) -> str:
+    """Normalize a term for lightweight terminology consistency checks."""
+    return re.sub(r"[^a-z0-9]", "", term.lower())
+
+
+def _deterministic_consistency_issues(segments: List[Dict]) -> Dict[str, List[Dict]]:
+    """
+    Flag obvious terminology notation drift across a document.
+
+    This intentionally targets low-risk cases such as:
+    - hyphenation drift: "e-mail" vs "email"
+    - capitalization drift: "api" vs "API"
+    - casing/notation drift for repeated technical terms
+    """
+    occurrences: Dict[str, Dict[str, Any]] = {}
+
+    for seg in segments:
+        if seg.get("status") == "skip":
+            continue
+
+        text = seg.get("text", "") or ""
+        seg_id = seg.get("id")
+        if not seg_id or not text.strip():
+            continue
+
+        for match in _TERM_PATTERN.finditer(text):
+            term = match.group(0)
+            canonical = _canonicalize_term(term)
+
+            if len(canonical) < 3 or canonical in _STOP_WORDS:
+                continue
+
+            entry = occurrences.setdefault(canonical, {"variants": {}, "first_seen": []})
+            variant_occurrences = entry["variants"].setdefault(term, [])
+            variant_occurrences.append({
+                "segment_id": seg_id,
+                "offset": match.start(),
+                "length": len(term),
+                "span": term,
+            })
+            if term not in entry["first_seen"]:
+                entry["first_seen"].append(term)
+
+    issues_by_segment: Dict[str, List[Dict]] = {}
+
+    for entry in occurrences.values():
+        variants = entry["variants"]
+        if len(variants) < 2:
+            continue
+
+        counts = {variant: len(variant_occurrences) for variant, variant_occurrences in variants.items()}
+        preferred = max(
+            counts.items(),
+            key=lambda item: (item[1], -entry["first_seen"].index(item[0])),
+        )[0]
+
+        # Avoid noisy sentence-initial capitalization drift like "Client" vs "client".
+        variant_keys = {_canonicalize_term(variant) for variant in variants}
+        if len(variant_keys) != 1:
+            continue
+
+        for variant, variant_occurrences in variants.items():
+            if variant == preferred:
+                continue
+
+            only_case_change = variant.lower() == preferred.lower()
+            issue_type = "formatting" if only_case_change else "consistency"
+            severity = "info" if only_case_change else "warning"
+
+            for occurrence in variant_occurrences:
+                seg_id = occurrence["segment_id"]
+                issues_by_segment.setdefault(seg_id, []).append({
+                    "issue_type": issue_type,
+                    "issue": f"Inconsistent terminology variant: '{variant}' differs from preferred '{preferred}' used elsewhere in the document.",
+                    "suggestion": preferred,
+                    "span": occurrence["span"],
+                    "severity": severity,
+                    "offset": occurrence["offset"],
+                    "length": occurrence["length"],
+                    "confidence": 0.9,
+                    "source": "deterministic_consistency",
+                })
+
+    return issues_by_segment
 
 
 # ===========================================================================
@@ -521,8 +638,8 @@ def validate_text(
     text: str,
     segment_id: Optional[str] = None,
     auto_fix: bool = False,
-    min_issue_severity: str = "warning",
-    enable_ai: bool = False,
+    min_issue_severity: str = "info",
+    enable_ai: bool = True,
     term_summary: Optional[str] = None,
     document_context: Optional[Dict] = None,
 ) -> Dict:
@@ -554,9 +671,8 @@ def validate_text(
     all_issues = _merge_issues(deterministic_issues, ai_issues)
 
     # Severity filter
-    _order = {"info": 0, "warning": 1, "error": 2}
-    threshold = _order.get(min_issue_severity, 1)
-    all_issues = [i for i in all_issues if _order.get(i["severity"], 0) >= threshold]
+    threshold = _SEVERITY_ORDER.get(min_issue_severity, 0)
+    all_issues = [i for i in all_issues if _SEVERITY_ORDER.get(i["severity"], 0) >= threshold]
 
     if segment_id:
         for issue in all_issues:
@@ -578,7 +694,8 @@ def validate_segments(
     segments: List[Dict],
     auto_fix: bool = False,
     only_with_issues: bool = True,
-    enable_ai: bool = False,
+    enable_ai: bool = True,
+    min_issue_severity: str = "info",
     document_context: Optional[Dict] = None,
 ) -> List[Dict]:
     """
@@ -591,6 +708,7 @@ def validate_segments(
     """
     term_summary = None
     ai_results: Dict[str, List[Dict]] = {}
+    consistency_results = _deterministic_consistency_issues(segments)
 
     if enable_ai:
         term_summary = _build_term_summary(segments)
@@ -614,12 +732,12 @@ def validate_segments(
         # Layer 2: AI (already computed in batch)
         ai_issues = ai_results.get(seg_id, [])
 
-        # Merge
+        # Merge deterministic spacing, AI issues, and document-level consistency.
         all_issues = _merge_issues(deterministic_issues, ai_issues)
+        all_issues.extend(consistency_results.get(seg_id, []))
 
-        # Severity filter (warning+)
-        _order = {"info": 0, "warning": 1, "error": 2}
-        all_issues = [i for i in all_issues if _order.get(i["severity"], 0) >= 1]
+        threshold = _SEVERITY_ORDER.get(min_issue_severity, 0)
+        all_issues = [i for i in all_issues if _SEVERITY_ORDER.get(i["severity"], 0) >= threshold]
 
         if seg_id:
             for issue in all_issues:
