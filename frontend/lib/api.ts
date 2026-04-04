@@ -34,7 +34,7 @@ export interface ValidationIssue {
   issue_type: string
   issue: string
   suggestion: string
-  severity: 'warning' | 'info'
+  severity: 'error' | 'warning' | 'info'
 }
 
 export interface ValidationResult {
@@ -76,8 +76,13 @@ export interface GlossaryTerm {
   source: string
   target: string
   language: string
-  domain: string
-  notes: string
+  domain?: string | null
+  notes?: string | null
+}
+
+export interface GlossaryResponse {
+  terms: GlossaryTerm[]
+  style_rules: string[]
 }
 
 export interface ApproveResponse {
@@ -111,6 +116,25 @@ export interface ExportStatusResponse {
 }
 
 export type ExportFormat = 'same' | 'docx' | 'pdf'
+
+export interface ShareRecipient {
+  clerkUserId: string
+  email: string
+  name: string | null
+  accessedAt: string
+}
+
+export interface ShareOverviewResponse {
+  ownedByDocument: Record<
+    string,
+    {
+      shareId: string
+      shareUrl: string
+      recipients: ShareRecipient[]
+    }
+  >
+  receivedDocumentIds: string[]
+}
 
 export async function uploadDocument(
   file: File,
@@ -186,23 +210,14 @@ export async function approveSegment(segmentId: string, approved: boolean, corre
   return res.data
 }
 
-export async function getGlossary(): Promise<GlossaryTerm[]> {
-  const res = await apiClient.get<GlossaryTerm[]>('/glossary')
+export async function getGlossary(): Promise<GlossaryResponse> {
+  const res = await apiClient.get<GlossaryResponse>('/glossary')
   return res.data
 }
 
-export async function addGlossaryTerm(term: Omit<GlossaryTerm, 'id'>): Promise<GlossaryTerm> {
-  const res = await apiClient.post<GlossaryTerm>('/glossary', { term })
+export async function addGlossaryTerm(term: GlossaryTerm): Promise<GlossaryResponse> {
+  const res = await apiClient.post<GlossaryResponse>('/glossary', { term })
   return res.data
-}
-
-export async function updateGlossaryTerm(id: string, term: Partial<GlossaryTerm>): Promise<GlossaryTerm> {
-  const res = await apiClient.put<GlossaryTerm>(`/glossary/${id}`, { term })
-  return res.data
-}
-
-export async function deleteGlossaryTerm(id: string): Promise<void> {
-  await apiClient.delete(`/glossary/${id}`)
 }
 
 export async function checkHealth(): Promise<{ status: string }> {
@@ -243,4 +258,33 @@ export async function downloadExport(documentId: string, format: ExportFormat): 
   window.setTimeout(() => URL.revokeObjectURL(url), 1000)
 
   return filename
+}
+
+export async function createShareLink(documentId: string): Promise<{ shareId: string; shareUrl: string }> {
+  const response = await fetch('/api/shares', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ documentId }),
+  })
+
+  if (!response.ok) {
+    throw new Error('Failed to create share link.')
+  }
+
+  return response.json()
+}
+
+export async function getShareOverview(): Promise<ShareOverviewResponse> {
+  const response = await fetch('/api/shares', {
+    method: 'GET',
+    cache: 'no-store',
+  })
+
+  if (!response.ok) {
+    throw new Error('Failed to load share overview.')
+  }
+
+  return response.json()
 }
