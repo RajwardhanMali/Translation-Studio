@@ -13,7 +13,7 @@ from app.database import get_db
 from app.models.domain import Document, Segment as SegmentDB
 from app.models.schemas import TranslateRequest, TranslateResponse, Segment
 from app.utils.embeddings import encode_texts
-from app.services.rag_engine import classify_segment, store_translations_batch
+from app.services.rag_engine import classify_segment
 from app.services.llm_service import translate_batch, get_backend_info
 from app.services.glossary_engine import (
     build_glossary_prompt_fragment,
@@ -103,15 +103,27 @@ async def translate_document(request: TranslateRequest, db: Session = Depends(ge
             seg["updated_at"] = datetime.utcnow().isoformat()
             continue
 
-        if prev_language and prev_language.lower() != request.target_language.lower():
-            if seg.get("translated_text") and not seg.get("correction"):
-                seg["translated_text"] = None
-                seg["status"]          = "pending"
-                seg["tm_match_type"]   = None
-                seg["tm_score"]        = None
+        language_changed = (
+            prev_language and
+            prev_language.lower() != request.target_language.lower()
+        )
+        
+        if language_changed and seg.get("translated_text") and not seg.get("correction"):
+            # Language has changed — clear old translation so it gets re-processed
+            seg["translated_text"] = None
+            seg["status"]          = "pending"
+            seg["tm_match_type"]   = None
+            seg["tm_score"]        = None
 
         tt = seg.get("translated_text", "") or ""
-        if tt and not tt.startswith("[") and tt.strip() != seg.get("text", "").strip():
+        # If the caller explicitly passed segment_ids (retranslate / new-language re-run),
+        # always retranslate — don't skip because there's an existing translated_text.
+        if target_ids:
+            # Force retranslation: clear existing text so it goes through LLM
+            seg["translated_text"] = None
+            seg["status"]          = "pending"
+        elif tt and not tt.startswith("[") and tt.strip() != seg.get("text", "").strip():
+            # No explicit selection — skip segments already translated in the same language
             continue
         if not seg.get("text", "").strip():
             continue
@@ -192,14 +204,8 @@ async def translate_document(request: TranslateRequest, db: Session = Depends(ge
 
     db.commit()
 
-    try:
-        stored = store_translations_batch(
-            segments=[s for s in to_translate if not s.get("translated_text", "").startswith("[")],
-            target_language=request.target_language,
-        )
-        logger.info(f"TM auto-populated: {stored} entries added.")
-    except Exception as e:
-        logger.warning(f"TM auto-populate failed: {e}")
+    logger.info(f"Translation complete: {translated_count} segments translated. TM will be updated on approval.")
+
 
     return TranslateResponse(
         document_id=request.document_id,

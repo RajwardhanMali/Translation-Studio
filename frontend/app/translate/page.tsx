@@ -724,6 +724,14 @@ function TranslatePageContent() {
     Record<string, string>
   >({});
   const loadMoreRef = useRef<HTMLDivElement | null>(null);
+  // Keep a ref to the current targetLang so memoized SegmentRow callbacks
+  // always read the latest value (avoids stale closure in handleRetry).
+  
+  const targetLangRef = useRef(targetLang);
+  useEffect(() => {
+    targetLangRef.current = targetLang;
+  }, [targetLang]);
+
   const filteredSegments = useMemo(() => {
     const query = searchQuery.trim().toLowerCase();
     if (!query) return segments;
@@ -986,7 +994,7 @@ function TranslatePageContent() {
 
     setRetryingId(segment.segment_id);
     try {
-      await translateDocument(docId, targetLang, [], [segment.segment_id]);
+      await translateDocument(docId, targetLangRef.current, [], [segment.segment_id]);
       await refreshSingleSegment(segment.segment_id);
       const exportData = await getExportStatus(docId).catch(() => null);
       setExportStatus(exportData);

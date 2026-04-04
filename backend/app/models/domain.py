@@ -21,7 +21,7 @@ class User(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
-    documents = relationship("Document", back_populates="user")
+    documents = relationship("Document", back_populates="user", passive_deletes=True)
     segments = relationship("Segment", back_populates="user")
     glossary_terms = relationship("GlossaryTerm", back_populates="user")
 
@@ -41,7 +41,7 @@ class Document(Base):
     metadata_json = Column(JSON, default=dict)
 
     user = relationship("User", back_populates="documents")
-    segments = relationship("Segment", back_populates="document", cascade="all, delete-orphan")
+    segments = relationship("Segment", back_populates="document", cascade="all, delete-orphan", passive_deletes=True)
 
 class Segment(Base):
     __tablename__ = "segments"

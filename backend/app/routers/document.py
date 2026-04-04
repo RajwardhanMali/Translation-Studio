@@ -9,7 +9,7 @@ import logging
 from typing import List, Optional
 from fastapi import APIRouter, HTTPException, Depends
 from sqlalchemy.orm import Session
-from sqlalchemy import func
+from sqlalchemy import func, Integer
 
 from app.database import get_db
 from app.models.domain import Document, Segment
@@ -33,15 +33,39 @@ async def list_documents(db: Session = Depends(get_db)):
     Returns filename, type, upload date, block count, and translation
     progress (pending / reviewed / approved segment counts + % complete).
     """
+    # 1. Fetch documents
     docs = db.query(Document).order_by(Document.created_at.desc()).all()
-    results = []
     
+    if not docs:
+        return []
+
+    # 2. Fetch aggregate segment stats in ONE query instead of N+1
+    # We group by document_id and count statuses
+    stats_query = db.query(
+        Segment.document_id,
+        func.count(Segment.id).label("total"),
+        func.sum(func.cast(Segment.status == "pending", Integer)).label("pending"),
+        func.sum(func.cast(Segment.status == "reviewed", Integer)).label("reviewed"),
+        func.sum(func.cast(Segment.status == "approved", Integer)).label("approved")
+    ).filter(Segment.document_id.in_([d.id for d in docs])).group_by(Segment.document_id).all()
+
+    # Map stats to document_id for easy lookup
+    stats_map = {
+        s.document_id: {
+            "total": s.total or 0,
+            "pending": int(s.pending or 0),
+            "reviewed": int(s.reviewed or 0),
+            "approved": int(s.approved or 0),
+        }
+        for s in stats_query
+    }
+
+    results = []
     for doc in docs:
-        segments = db.query(Segment).filter(Segment.document_id == doc.id).all()
-        total = len(segments)
-        pending = sum(1 for s in segments if s.status == "pending")
-        reviewed = sum(1 for s in segments if s.status == "reviewed")
-        approved = sum(1 for s in segments if s.status == "approved")
+        st = stats_map.get(doc.id, {"total": 0, "pending": 0, "reviewed": 0, "approved": 0})
+        total = st["total"]
+        reviewed = st["reviewed"]
+        approved = st["approved"]
         
         progress = round((reviewed + approved) / total * 100, 1) if total else 0.0
         
@@ -51,12 +75,7 @@ async def list_documents(db: Session = Depends(get_db)):
             "file_type": doc.file_type,
             "created_at": doc.created_at.isoformat() if doc.created_at else None,
             "blocks_count": len(doc.blocks) if doc.blocks else 0,
-            "segments": {
-                "total": total,
-                "pending": pending,
-                "reviewed": reviewed,
-                "approved": approved,
-            },
+            "segments": st,
             "translation_progress": progress,
             "firebase_url": doc.firebase_url,
         })

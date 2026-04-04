@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { AnimatePresence, motion } from 'framer-motion'
 import { ArrowRight, File, FileText, FolderOpen, Link2, Loader2, RefreshCw, Sparkles, Trash2 } from 'lucide-react'
@@ -206,52 +206,65 @@ export default function DocumentsPage() {
   const [loading, setLoading] = useState(true)
   const [refreshing, setRefreshing] = useState(false)
   const [deletingId, setDeletingId] = useState<string | null>(null)
+  const isFetchingRef = useRef(false)
   const [shareOverview, setShareOverview] = useState<ShareOverviewResponse>({
     ownedByDocument: {},
     visibleByDocument: {},
     receivedDocumentIds: [],
   })
 
-  const loadDocuments = async (silent = false) => {
+  const loadDocuments = useCallback(async (silent = false) => {
+    // Prevent overlapping calls
+    if (isFetchingRef.current) {
+      console.log('Skipping loadDocuments: already fetching...')
+      return
+    }
+
+    isFetchingRef.current = true
     if (silent) setRefreshing(true)
     else setLoading(true)
+
+    console.log(`Fetching documents library (silent=${silent})...`)
+    const startTime = Date.now()
 
     try {
       const [data, shareData] = await Promise.all([
         getDocuments(),
-        getShareOverview().catch(() => ({
-          ownedByDocument: {},
-          visibleByDocument: {},
-          receivedDocumentIds: [],
-        })),
+        getShareOverview().catch((err) => {
+          console.warn('Share overview failed to load:', err)
+          return {
+            ownedByDocument: {},
+            visibleByDocument: {},
+            receivedDocumentIds: [],
+          }
+        }),
       ])
-      setDocuments(data)
+
+      const duration = Date.now() - startTime
+      console.log(`Documents loaded in ${duration}ms. Count: ${data?.length ?? 0}`)
+      
+      setDocuments(data || [])
       setShareOverview(shareData)
-    } catch {
+    } catch (err) {
+      console.error('Failed to load documents:', err)
       toast({
         title: 'Failed to load documents',
         description: 'Could not fetch your document library from the backend.',
         variant: 'destructive',
       })
-      setDocuments([])
-      setShareOverview({
-        ownedByDocument: {},
-        visibleByDocument: {},
-        receivedDocumentIds: [],
-      })
+      // Only clear list if it was a hard error (not silent)
+      if (!silent) setDocuments([])
     } finally {
       setLoading(false)
       setRefreshing(false)
+      isFetchingRef.current = false
     }
-  }
+  }, [toast])
 
   useEffect(() => {
+    // Initial load
     void loadDocuments()
-    const interval = window.setInterval(() => {
-      void loadDocuments(true)
-    }, 30000)
-    return () => window.clearInterval(interval)
-  }, [])
+  }, [loadDocuments])
 
   const totals = useMemo(
     () =>

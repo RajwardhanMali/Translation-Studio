@@ -98,12 +98,15 @@ async def approve_segment(request: ApproveRequest, db: Session = Depends(get_db)
     seg.updated_at = datetime.utcnow()
     
     doc = db.query(Document).filter(Document.id == seg.document_id).first()
-    target_language = doc.metadata_json.get("target_language", "fr") if doc.metadata_json else "fr"
+    # Read the language that was actually used during translation.
+    # Never fall back to a hard-coded language — if unknown, skip TM learning.
+    target_language = ""
+    if doc and doc.metadata_json:
+        target_language = doc.metadata_json.get("target_language", "")
     
     db.commit()
 
-    if request.approved:
-        # Construct dictionary representation for learning service
+    if request.approved and target_language:
         seg_dict = {
             "id": seg.id,
             "text": seg.text,
@@ -111,12 +114,18 @@ async def approve_segment(request: ApproveRequest, db: Session = Depends(get_db)
             "final_text": seg.final_text,
             "correction": seg.correction,
             "status": seg.status,
-            "target_language": target_language
+            "document_id": seg.document_id,
+            "target_language": target_language,
         }
         try:
             on_segment_approved(segment=seg_dict, target_language=target_language)
         except Exception as e:
             logger.warning(f"Learning pipeline failed: {e}")
+    elif request.approved and not target_language:
+        logger.warning(
+            f"Skipping TM store for segment {request.segment_id}: "
+            "no target_language found in document metadata (was document translated?)"
+        )
 
     return ApproveResponse(
         segment_id=request.segment_id,
