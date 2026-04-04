@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { AnimatePresence, motion } from 'framer-motion'
-import { ArrowRight, File, FileText, FolderOpen, Link2, Loader2, RefreshCw, Sparkles, Trash2 } from 'lucide-react'
+import { ArrowRight, File, FileText, FolderOpen, LayoutGrid, Link2, List, Loader2, RefreshCw, Sparkles, Trash2 } from 'lucide-react'
 import {
   AlertDialog,
   AlertDialogAction,
@@ -200,6 +200,110 @@ function DocumentCard({
   )
 }
 
+function DocumentRow({
+  document,
+  deleting,
+  received,
+  onOpen,
+  onDelete,
+  onShare,
+}: {
+  document: DocumentSummary
+  deleting: boolean
+  received: boolean
+  onOpen: () => void
+  onDelete: () => Promise<void>
+  onShare: () => Promise<void>
+}) {
+  const FileIcon = document.file_type === 'pdf' ? FileText : File
+
+  return (
+    <HoverCard
+      layout
+      initial={{ opacity: 0, y: 10 }}
+      animate={{ opacity: 1, y: 0 }}
+      exit={{ opacity: 0, y: -10 }}
+      transition={{ duration: 0.35, ease: [0.22, 1, 0.36, 1] }}
+      className="glass-panel group relative flex items-center gap-4 rounded-2xl border border-border/70 p-4 transition-all duration-200 hover:border-primary/40 hover:bg-accent/10"
+    >
+      <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-muted transition-colors group-hover:bg-primary/10">
+        <FileIcon className="h-5 w-5 text-foreground transition-colors group-hover:text-primary" />
+      </div>
+      
+      <div className="min-w-0 flex-1">
+        <div className="flex items-center gap-3">
+          <p className="truncate text-sm font-semibold text-foreground">{document.filename}</p>
+          <FileTypeBadge fileType={document.file_type} />
+          {received && (
+            <Badge variant="outline" className="rounded-full border-cyan-200 bg-cyan-50 text-[10px] text-cyan-700 dark:border-cyan-900/60 dark:bg-cyan-950/40 dark:text-cyan-200">
+              Shared
+            </Badge>
+          )}
+        </div>
+        <div className="mt-1 flex items-center gap-3 text-[11px] text-muted-foreground">
+          <span>{document.blocks_count} blocks</span>
+          {document.created_at && (
+            <>
+              <span className="h-1 w-1 rounded-full bg-muted-foreground/30" />
+              <span>{formatRelativeTime(document.created_at)}</span>
+            </>
+          )}
+        </div>
+      </div>
+
+      <div className="hidden w-48 shrink-0 flex-col gap-1.5 md:flex">
+        <div className="flex items-center justify-between text-[11px] text-muted-foreground">
+          <span>{Math.round(document.translation_progress)}% complete</span>
+          <span>{document.segments.total} segs</span>
+        </div>
+        <div className="h-1.5 overflow-hidden rounded-full bg-muted">
+          <div className="flex h-full">
+            <div className="bg-slate-300 dark:bg-slate-700" style={{ width: `${(document.segments.pending / Math.max(document.segments.total, 1)) * 100}%` }} />
+            <div className="bg-amber-400" style={{ width: `${(document.segments.reviewed / Math.max(document.segments.total, 1)) * 100}%` }} />
+            <div className="bg-emerald-500" style={{ width: `${(document.segments.approved / Math.max(document.segments.total, 1)) * 100}%` }} />
+          </div>
+        </div>
+      </div>
+
+      <div className="flex items-center gap-2">
+        <Button variant="ghost" size="icon" className="h-9 w-9 rounded-xl hover:bg-primary/10 hover:text-primary" onClick={() => void onShare()}>
+          <Link2 className="h-4 w-4" />
+        </Button>
+        <Button variant="ghost" size="icon" className="h-9 w-9 rounded-xl hover:bg-primary/10 hover:text-primary" onClick={onOpen}>
+          <ArrowRight className="h-4 w-4" />
+        </Button>
+        <AlertDialog>
+          <AlertDialogTrigger asChild>
+            <Button variant="ghost" size="icon" className="h-9 w-9 rounded-xl text-red-500 hover:bg-red-50 hover:text-red-700 dark:hover:bg-red-950/40">
+              {deleting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}
+            </Button>
+          </AlertDialogTrigger>
+          <AlertDialogContent>
+            <AlertDialogHeader>
+              <AlertDialogTitle>Delete document?</AlertDialogTitle>
+              <AlertDialogDescription>
+                {document.filename} will be removed from your library.
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+            <AlertDialogFooter>
+              <AlertDialogCancel>Cancel</AlertDialogCancel>
+              <AlertDialogAction
+                onClick={(event) => {
+                  event.preventDefault()
+                  void onDelete()
+                }}
+                className="bg-red-600 hover:bg-red-700"
+              >
+                Delete
+              </AlertDialogAction>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
+      </div>
+    </HoverCard>
+  )
+}
+
 export default function DocumentsPage() {
   const router = useRouter()
   const { toast } = useToast()
@@ -208,6 +312,7 @@ export default function DocumentsPage() {
   const { documents, isLoading: loading, mutate: mutateDocs } = useDocuments()
   const { shareOverview, mutate: mutateShares } = useShareOverview()
   
+  const [viewMode, setViewMode] = useState<'grid' | 'list'>('grid')
   const [refreshing, setRefreshing] = useState(false)
   const [deletingId, setDeletingId] = useState<string | null>(null)
 
@@ -301,6 +406,24 @@ export default function DocumentsPage() {
                 </div>
               </div>
               <div className="mt-4 flex flex-wrap gap-2">
+                <div className="flex items-center gap-1 rounded-2xl border border-white/20 bg-white/5 p-1">
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className={cn('h-8 w-8 rounded-xl p-0', viewMode === 'grid' && 'bg-primary text-primary-foreground')}
+                    onClick={() => setViewMode('grid')}
+                  >
+                    <LayoutGrid className="h-4 w-4" />
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className={cn('h-8 w-8 rounded-xl p-0', viewMode === 'list' && 'bg-primary text-primary-foreground')}
+                    onClick={() => setViewMode('list')}
+                  >
+                    <List className="h-4 w-4" />
+                  </Button>
+                </div>
                 <Button variant="outline" className="rounded-2xl" onClick={handleRefresh} disabled={refreshing}>
                   <RefreshCw className={cn('mr-2 h-4 w-4', refreshing && 'animate-spin')} />
                   Refresh
@@ -354,18 +477,30 @@ export default function DocumentsPage() {
             </Button>
           </Card>
         ) : (
-          <motion.div layout className="grid gap-4 xl:grid-cols-3">
+          <motion.div layout className={cn('grid gap-4', viewMode === 'grid' ? 'xl:grid-cols-3' : 'grid-cols-1')}>
             <AnimatePresence mode="popLayout">
             {documents.map((document) => (
-              <DocumentCard
-                key={document.id}
-                document={document}
-                deleting={deletingId === document.id}
-                received={shareOverview.receivedDocumentIds.includes(document.id)}
-                onOpen={() => router.push(`/translate?doc=${document.id}`)}
-                onDelete={() => handleDelete(document.id)}
-                onShare={() => handleShare(document.id)}
-              />
+              viewMode === 'grid' ? (
+                <DocumentCard
+                  key={document.id}
+                  document={document}
+                  deleting={deletingId === document.id}
+                  received={shareOverview.receivedDocumentIds.includes(document.id)}
+                  onOpen={() => router.push(`/translate?doc=${document.id}`)}
+                  onDelete={() => handleDelete(document.id)}
+                  onShare={() => handleShare(document.id)}
+                />
+              ) : (
+                <DocumentRow
+                  key={document.id}
+                  document={document}
+                  deleting={deletingId === document.id}
+                  received={shareOverview.receivedDocumentIds.includes(document.id)}
+                  onOpen={() => router.push(`/translate?doc=${document.id}`)}
+                  onDelete={() => handleDelete(document.id)}
+                  onShare={() => handleShare(document.id)}
+                />
+              )
             ))}
             </AnimatePresence>
           </motion.div>
