@@ -105,7 +105,7 @@ export function AppShell({
             </div>
             <div className={cn("min-w-0", sidebarCollapsed && "hidden")}>
               <p className="text-base font-semibold leading-none text-sidebar-foreground">
-                SynTra AI
+                Syntra AI
               </p>
               <p className="mt-1 text-xs text-sidebar-muted-foreground">
                 Premium review workspace

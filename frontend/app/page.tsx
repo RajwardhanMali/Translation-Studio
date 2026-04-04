@@ -57,7 +57,7 @@ export default async function HomePage() {
               <Languages className="h-5 w-5" />
             </div>
             <div>
-              <p className="text-sm font-semibold text-foreground">SynTra AI</p>
+              <p className="text-sm font-semibold text-foreground">Syntra AI</p>
               <p className="text-xs text-muted-foreground">
                 AI workflow for premium multilingual delivery
               </p>
@@ -103,7 +103,7 @@ export default async function HomePage() {
                 files you deliver.
               </h1>
               <p className="max-w-2xl text-base leading-8 text-muted-foreground md:text-lg">
-                SynTra AI helps teams move from raw source documents to
+                Syntra AI helps teams move from raw source documents to
                 export-ready multilingual assets through a calmer, more
                 beautiful workflow for validation, translation, review, and
                 collaboration.
