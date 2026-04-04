@@ -7,8 +7,8 @@ import { Toaster } from '@/components/ui/toaster'
 import './globals.css'
 
 export const metadata: Metadata = {
-  title: 'Translation Studio',
-  description: 'Premium translation workspace for validation, multilingual review, glossary control, and export.',
+  title: 'SynTra AI',
+  description: 'Premium ai translation workspace for validation, multilingual review, glossary control, and export.',
   generator: 'Codex',
 }
 

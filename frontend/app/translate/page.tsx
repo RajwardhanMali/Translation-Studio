@@ -5,28 +5,31 @@ import { AnimatePresence, motion } from "framer-motion";
 import { useSearchParams, useRouter } from "next/navigation";
 import {
   AlertTriangle,
-  ArrowRight,
   BookOpen,
   Check,
   CheckCircle2,
   ChevronRight,
   Copy,
-  Download,
-  Globe,
   Languages,
   Lightbulb,
-  Plus,
   RefreshCw,
   RotateCcw,
   Sparkles,
+  Users,
   WandSparkles,
   X,
 } from "lucide-react";
 import { AppShell } from "@/components/app-shell";
+import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { HoverCard, Reveal } from "@/components/motion/primitives";
+import {
+  HoverCard as ProfileHoverCard,
+  HoverCardContent,
+  HoverCardTrigger,
+} from "@/components/ui/hover-card";
 import {
   Select,
   SelectContent,
@@ -43,10 +46,12 @@ import {
   downloadExport,
   getExportStatus,
   getSegments,
+  getShareOverview,
   translateDocument,
   type ExportFormat,
   type ExportStatusResponse,
   type Segment,
+  type ShareOverviewResponse,
 } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
@@ -65,15 +70,11 @@ const LANGUAGES = [
 const STATUS_FILTERS = ["all", "pending", "reviewed", "approved"] as const;
 type StatusFilter = (typeof STATUS_FILTERS)[number];
 const VISIBLE_TYPES = new Set(["sentence", "heading", "table_cell"]);
-const CUSTOM_SEGMENT_PREFIX = "custom-segment";
-
 type WorkspaceSegment = Segment & {
-  localOnly?: boolean;
   sourceEdited?: boolean;
 };
 
 type LocalWorkspaceState = {
-  customSegments: WorkspaceSegment[];
   sourceOverrides: Record<string, string>;
   outputOverrides: Record<string, string>;
 };
@@ -84,21 +85,18 @@ function getWorkspaceStorageKey(documentId: string) {
 
 function readLocalWorkspaceState(documentId: string): LocalWorkspaceState {
   if (typeof window === "undefined" || !documentId) {
-    return { customSegments: [], sourceOverrides: {}, outputOverrides: {} };
+    return { sourceOverrides: {}, outputOverrides: {} };
   }
 
   try {
     const raw = window.localStorage.getItem(getWorkspaceStorageKey(documentId));
     if (!raw) {
-      return { customSegments: [], sourceOverrides: {}, outputOverrides: {} };
+      return { sourceOverrides: {}, outputOverrides: {} };
     }
 
     const parsed = JSON.parse(raw) as Partial<LocalWorkspaceState>;
 
     return {
-      customSegments: Array.isArray(parsed.customSegments)
-        ? parsed.customSegments
-        : [],
       sourceOverrides:
         parsed.sourceOverrides && typeof parsed.sourceOverrides === "object"
           ? parsed.sourceOverrides
@@ -109,7 +107,7 @@ function readLocalWorkspaceState(documentId: string): LocalWorkspaceState {
           : {},
     };
   } catch {
-    return { customSegments: [], sourceOverrides: {}, outputOverrides: {} };
+    return { sourceOverrides: {}, outputOverrides: {} };
   }
 }
 
@@ -176,6 +174,13 @@ function normalizeSegment(
 
 function getStatusParam(statusFilter: StatusFilter) {
   return statusFilter === "all" ? undefined : statusFilter;
+}
+
+function getUserInitials(name?: string | null, email?: string | null) {
+  const source = (name || email || "User").trim();
+  const parts = source.split(/\s+/).filter(Boolean);
+  if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
+  return `${parts[0][0] ?? ""}${parts[1][0] ?? ""}`.toUpperCase();
 }
 
 function isTranslationError(text: string | undefined) {
@@ -407,13 +412,13 @@ function SegmentRow({
           </div>
         </div>
 
-        <div className="flex w-full flex-wrap items-center gap-2 md:w-auto md:justify-end">
+        <div className="grid w-full grid-cols-2 gap-2 sm:flex sm:flex-wrap sm:items-center md:w-auto md:justify-end">
           {editingMode !== "none" ? (
             <>
               <Button
                 size="icon-sm"
                 onClick={handleSave}
-                className="rounded-xl"
+                className="rounded-xl justify-center"
               >
                 <Check className="h-3.5 w-3.5" />
               </Button>
@@ -421,7 +426,7 @@ function SegmentRow({
                 size="icon-sm"
                 variant="outline"
                 onClick={handleCancel}
-                className="rounded-xl"
+                className="rounded-xl justify-center"
               >
                 <X className="h-3.5 w-3.5" />
               </Button>
@@ -432,7 +437,7 @@ function SegmentRow({
                 size="sm"
                 variant="outline"
                 onClick={() => void onRetry(segment)}
-                disabled={retrying || segment.localOnly}
+                disabled={retrying}
                 className="rounded-xl"
               >
                 {retrying ? (
@@ -462,7 +467,7 @@ function SegmentRow({
                 size="icon-sm"
                 onClick={handleApprove}
                 disabled={approving || segment.status === "approved"}
-                className="rounded-xl"
+                className="rounded-xl justify-center"
               >
                 {approving ? (
                   <Spinner className="h-3.5 w-3.5" />
@@ -521,11 +526,6 @@ function SegmentRow({
               Translated Output
             </p>
             <Sparkles className="h-3.5 w-3.5 text-primary" />
-            {segment.localOnly && (
-              <Badge variant="outline" className="rounded-full text-[10px]">
-                Local custom segment
-              </Badge>
-            )}
           </div>
           {editingMode === "output" ? (
             <Textarea
@@ -552,13 +552,6 @@ function SegmentRow({
                 "Not yet translated"}
             </p>
           )}
-          {segment.localOnly && (
-            <p className="mt-4 text-xs leading-6 text-muted-foreground">
-              This custom segment is local to the workspace. The current backend
-              does not expose segment creation yet, so it cannot be machine
-              retranslated server-side.
-            </p>
-          )}
           {(segment.tm_suggestions?.length ?? 0) > 0 && (
             <button
               className="mt-4 inline-flex items-center gap-1.5 text-xs font-medium text-primary transition-colors hover:text-primary/80"
@@ -576,7 +569,6 @@ function SegmentRow({
             </button>
           )}
         </div>
-
       </div>
 
       {showTM &&
@@ -649,17 +641,18 @@ function TranslatePageContent() {
   const [exportStatus, setExportStatus] = useState<ExportStatusResponse | null>(
     null,
   );
+  const [shareOverview, setShareOverview] = useState<ShareOverviewResponse>({
+    ownedByDocument: {},
+    receivedDocumentIds: [],
+  });
   const [exportFormat, setExportFormat] = useState<ExportFormat>("same");
   const [exporting, setExporting] = useState(false);
-  const [sourceOverrides, setSourceOverrides] = useState<Record<string, string>>(
-    {},
-  );
-  const [outputOverrides, setOutputOverrides] = useState<Record<string, string>>(
-    {},
-  );
-  const [customSegments, setCustomSegments] = useState<WorkspaceSegment[]>([]);
-  const [customSourceText, setCustomSourceText] = useState("");
-  const [showCustomSegmentForm, setShowCustomSegmentForm] = useState(false);
+  const [sourceOverrides, setSourceOverrides] = useState<
+    Record<string, string>
+  >({});
+  const [outputOverrides, setOutputOverrides] = useState<
+    Record<string, string>
+  >({});
 
   const selectableIds = segments.map((segment) => segment.segment_id);
   const allSelected =
@@ -672,18 +665,16 @@ function TranslatePageContent() {
     const storedState = readLocalWorkspaceState(docId);
     setSourceOverrides(storedState.sourceOverrides);
     setOutputOverrides(storedState.outputOverrides);
-    setCustomSegments(storedState.customSegments);
   }, [docId]);
 
   useEffect(() => {
     if (!docId) return;
 
     persistLocalWorkspaceState(docId, {
-      customSegments,
       sourceOverrides,
       outputOverrides,
     });
-  }, [customSegments, docId, outputOverrides, sourceOverrides]);
+  }, [docId, outputOverrides, sourceOverrides]);
 
   const loadSegments = async (
     nextStatusFilter: StatusFilter = statusFilter,
@@ -699,23 +690,22 @@ function TranslatePageContent() {
     try {
       const data = await getSegments(docId, getStatusParam(nextStatusFilter));
       const normalizedSegments = data
-          .map((segment, index) =>
-            normalizeSegment(
-              segment as Partial<Segment> & Record<string, unknown>,
-              index,
-            ),
-          )
-          .filter(isVisibleSegment)
-          .map((segment) => ({
-            ...segment,
-            source_text:
-              sourceOverrides[segment.segment_id] ?? segment.source_text,
-            final_text:
-              outputOverrides[segment.segment_id] ?? segment.final_text,
-            sourceEdited: Boolean(sourceOverrides[segment.segment_id]),
-          }));
+        .map((segment, index) =>
+          normalizeSegment(
+            segment as Partial<Segment> & Record<string, unknown>,
+            index,
+          ),
+        )
+        .filter(isVisibleSegment)
+        .map((segment) => ({
+          ...segment,
+          source_text:
+            sourceOverrides[segment.segment_id] ?? segment.source_text,
+          final_text: outputOverrides[segment.segment_id] ?? segment.final_text,
+          sourceEdited: Boolean(sourceOverrides[segment.segment_id]),
+        }));
 
-      setSegments([...customSegments, ...normalizedSegments]);
+      setSegments(normalizedSegments);
     } catch {
       toast({
         title: "Failed to load segments",
@@ -731,7 +721,7 @@ function TranslatePageContent() {
 
   useEffect(() => {
     void loadSegments(statusFilter);
-  }, [customSegments, docId, outputOverrides, sourceOverrides, statusFilter]);
+  }, [docId, outputOverrides, sourceOverrides, statusFilter]);
 
   useEffect(() => {
     if (!docId) {
@@ -743,6 +733,19 @@ function TranslatePageContent() {
       .then((data) => setExportStatus(data))
       .catch(() => setExportStatus(null));
   }, [docId, segments]);
+
+  useEffect(() => {
+    if (!docId) {
+      setShareOverview({ ownedByDocument: {}, receivedDocumentIds: [] });
+      return;
+    }
+
+    getShareOverview()
+      .then((data) => setShareOverview(data))
+      .catch(() =>
+        setShareOverview({ ownedByDocument: {}, receivedDocumentIds: [] }),
+      );
+  }, [docId]);
 
   const refreshSingleSegment = async (segmentId: string) => {
     const refreshed = (await getSegments(docId, getStatusParam(statusFilter)))
@@ -756,19 +759,6 @@ function TranslatePageContent() {
     const nextSegment = refreshed.find(
       (segment) => segment.segment_id === segmentId,
     );
-
-    const customSegment = customSegments.find(
-      (segment) => segment.segment_id === segmentId,
-    );
-
-    if (customSegment) {
-      setSegments((prev) =>
-        prev.map((segment) =>
-          segment.segment_id === segmentId ? customSegment : segment,
-        ),
-      );
-      return;
-    }
 
     if (!nextSegment) {
       setSegments((prev) =>
@@ -797,22 +787,29 @@ function TranslatePageContent() {
 
   const handleTranslate = async () => {
     if (!docId) return;
+    const segmentIds = Array.from(selectedIds);
+
+    if (segmentIds.length === 0) {
+      setTranslationMessage("Select one or more segments to translate.");
+      toast({
+        title: "No segments selected",
+        description: "Choose the segments you want to translate first.",
+        variant: "destructive",
+      });
+      return;
+    }
 
     setTranslating(true);
     setTranslationMessage(null);
 
     try {
-      const data = await translateDocument(docId, targetLang, []);
+      const data = await translateDocument(docId, targetLang, [], segmentIds);
       await loadSegments(statusFilter);
       const exportData = await getExportStatus(docId).catch(() => null);
       setExportStatus(exportData);
       setTranslationMessage(
-        `${data.segments_translated} new segments translated`,
+        `${data.segments_translated} selected segment${data.segments_translated === 1 ? "" : "s"} translated`,
       );
-      toast({
-        title: "Translation complete",
-        description: `${data.segments_translated} new segments translated.`,
-      });
     } catch (error) {
       setTranslationMessage("Translation failed. Please try again.");
       toast({
@@ -827,21 +824,10 @@ function TranslatePageContent() {
   };
 
   const handleRetry = async (segment: WorkspaceSegment) => {
-    if (segment.localOnly) {
-      toast({
-        title: "Local segment only",
-        description:
-          "Custom segments live only in the frontend workspace right now and cannot be retranslated by the backend.",
-      });
-      return;
-    }
-
     if (sourceOverrides[segment.segment_id]) {
-      toast({
-        title: "Source edit is local",
-        description:
-          "This retranslation uses the backend's original source segment. Your source edit stays in the frontend workspace only.",
-      });
+      setTranslationMessage(
+        "Retranslation uses the backend's original source for edited segments.",
+      );
     }
 
     setRetryingId(segment.segment_id);
@@ -850,11 +836,9 @@ function TranslatePageContent() {
       await refreshSingleSegment(segment.segment_id);
       const exportData = await getExportStatus(docId).catch(() => null);
       setExportStatus(exportData);
-      toast({
-        title: "Segment retried",
-        description: "The failed segment was sent back for translation.",
-      });
+      setTranslationMessage("Selected segment retranslated.");
     } catch {
+      setTranslationMessage("Segment retranslation failed. Please try again.");
       toast({
         title: "Retry failed",
         description: "The segment could not be retranslated right now.",
@@ -886,32 +870,9 @@ function TranslatePageContent() {
   const handleApprove = async (
     segment: WorkspaceSegment,
     finalText: string,
+    options?: { silentSuccess?: boolean },
   ) => {
     const segmentId = segment.segment_id;
-
-    if (segment.localOnly) {
-      setCustomSegments((prev) =>
-        prev.map((segment) =>
-          segment.segment_id === segmentId
-            ? { ...segment, final_text: finalText, status: "approved" }
-            : segment,
-        ),
-      );
-      setOutputOverrides((prev) => ({ ...prev, [segmentId]: finalText }));
-      setSegments((prev) =>
-        prev.map((segment) =>
-          segment.segment_id === segmentId
-            ? { ...segment, final_text: finalText, status: "approved" }
-            : segment,
-        ),
-      );
-      toast({
-        title: "Local segment approved",
-        description:
-          "The custom segment was saved in the current workspace only.",
-      });
-      return;
-    }
 
     try {
       const response = await approveSegment(segmentId, true, finalText);
@@ -937,10 +898,12 @@ function TranslatePageContent() {
       }
       const exportData = await getExportStatus(docId).catch(() => null);
       setExportStatus(exportData);
-      toast({
-        title: "Segment approved",
-        description: "Correction saved and learning triggered.",
-      });
+      if (!options?.silentSuccess) {
+        toast({
+          title: "Segment approved",
+          description: "Correction saved and learning triggered.",
+        });
+      }
     } catch {
       toast({
         title: "Failed to approve segment",
@@ -952,13 +915,6 @@ function TranslatePageContent() {
 
   const handleUpdateOutput = (segmentId: string, finalText: string) => {
     setOutputOverrides((prev) => ({ ...prev, [segmentId]: finalText }));
-    setCustomSegments((prev) =>
-      prev.map((segment) =>
-        segment.segment_id === segmentId
-          ? { ...segment, final_text: finalText }
-          : segment,
-      ),
-    );
     setSegments((prev) =>
       prev.map((segment) =>
         segment.segment_id === segmentId
@@ -970,13 +926,6 @@ function TranslatePageContent() {
 
   const handleUpdateSource = (segmentId: string, sourceText: string) => {
     setSourceOverrides((prev) => ({ ...prev, [segmentId]: sourceText }));
-    setCustomSegments((prev) =>
-      prev.map((segment) =>
-        segment.segment_id === segmentId
-          ? { ...segment, source_text: sourceText, sourceEdited: true }
-          : segment,
-      ),
-    );
     setSegments((prev) =>
       prev.map((segment) =>
         segment.segment_id === segmentId
@@ -984,46 +933,6 @@ function TranslatePageContent() {
           : segment,
       ),
     );
-  };
-
-  const handleAddCustomSegment = () => {
-    const value = customSourceText.trim();
-
-    if (!value) {
-      toast({
-        title: "Custom text is empty",
-        description: "Add some source text before creating a custom segment.",
-        variant: "destructive",
-      });
-      return;
-    }
-
-    const customSegment: WorkspaceSegment = {
-      segment_id: `${CUSTOM_SEGMENT_PREFIX}-${crypto.randomUUID()}`,
-      source_text: value,
-      translated_text: "",
-      final_text: "",
-      status: "pending",
-      type: "sentence",
-      tm_match_type: null,
-      tm_suggestions: [],
-      glossary_violations: [],
-      format_snapshot: null,
-      row: null,
-      col: null,
-      localOnly: true,
-      sourceEdited: true,
-    };
-
-    setCustomSegments((prev) => [customSegment, ...prev]);
-    setSegments((prev) => [customSegment, ...prev]);
-    setCustomSourceText("");
-    setShowCustomSegmentForm(false);
-    toast({
-      title: "Custom segment added",
-      description:
-        "The segment was added to this workspace. It is local until backend support exists for saving new segments.",
-    });
   };
 
   const toggleSelect = (id: string) => {
@@ -1036,16 +945,21 @@ function TranslatePageContent() {
   };
 
   const handleBulkApprove = async () => {
+    const count = selectedIds.size;
+
     for (const id of selectedIds) {
       const segment = segments.find((item) => item.segment_id === id);
       if (segment)
         await handleApprove(
           segment,
           segment.final_text || segment.translated_text,
+          { silentSuccess: true },
         );
     }
     setSelectedIds(new Set());
-    toast({ title: `${selectedIds.size} segments approved` });
+    if (count > 0) {
+      toast({ title: `${count} segments approved` });
+    }
   };
 
   const handleSelectAll = () => {
@@ -1095,6 +1009,26 @@ function TranslatePageContent() {
   const progress = segments.length
     ? Math.round((completedCount / segments.length) * 100)
     : 0;
+  const sharedRecipients =
+    docId && shareOverview.ownedByDocument[docId]
+      ? shareOverview.ownedByDocument[docId].recipients
+      : [];
+  const recipientOffsets = [
+    "left-[10%] top-[14%]",
+    "left-[36%] top-[38%]",
+    "right-[18%] top-[12%]",
+    "right-[6%] top-[52%]",
+    "left-[18%] bottom-[8%]",
+    "left-[56%] bottom-[14%]",
+  ];
+  const recipientThemes = [
+    "from-cyan-400/70 via-sky-400/65 to-blue-500/75",
+    "from-teal-400/70 via-cyan-400/60 to-sky-500/70",
+    "from-blue-400/70 via-indigo-400/60 to-cyan-500/70",
+    "from-emerald-400/70 via-teal-400/60 to-cyan-500/70",
+    "from-sky-400/70 via-blue-400/60 to-indigo-500/70",
+    "from-cyan-400/70 via-teal-400/60 to-emerald-500/70",
+  ];
 
   return (
     <AppShell
@@ -1107,13 +1041,17 @@ function TranslatePageContent() {
     >
       <div className="space-y-6">
         <Reveal className="glass-panel hero-sheen overflow-hidden rounded-[2rem]">
-          <div className="grid gap-6 px-6 py-6 lg:grid-cols-[1.2fr_0.8fr] lg:px-8 lg:py-8">
-            <div>
+          <div className="grid gap-6 px-6 py-6 lg:grid-cols-[minmax(0,1.15fr)_minmax(280px,0.85fr)] lg:px-8 lg:py-8">
+            <div className="min-w-0">
               <motion.div
                 initial={{ opacity: 0, y: 12 }}
                 whileInView={{ opacity: 1, y: 0 }}
                 viewport={{ once: true, amount: 0.4 }}
-                transition={{ duration: 0.4, delay: 0.08, ease: [0.22, 1, 0.36, 1] }}
+                transition={{
+                  duration: 0.4,
+                  delay: 0.08,
+                  ease: [0.22, 1, 0.36, 1],
+                }}
                 className="inline-flex items-center gap-2 rounded-full border border-border/60 bg-background/70 px-3 py-1 text-xs font-medium text-muted-foreground"
               >
                 <WandSparkles className="h-3.5 w-3.5 text-primary" />
@@ -1126,185 +1064,130 @@ function TranslatePageContent() {
                 Generate drafts, inspect glossary risks, compare translation
                 memory suggestions, and approve final copy without losing focus.
               </p>
-
-              <div className="mt-6 grid gap-3 xl:grid-cols-3">
-                <div className="flex min-w-0 items-center gap-3 rounded-2xl border border-border/60 bg-background/75 px-4 py-3">
-                  <Globe className="h-4 w-4 shrink-0 text-muted-foreground" />
-                  <div className="min-w-0 flex-1">
-                    <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">
-                      Target Language
-                    </p>
-                    <Select value={targetLang} onValueChange={setTargetLang}>
-                      <SelectTrigger className="mt-2 h-11 rounded-xl border-border/70 bg-background/90 text-sm">
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {LANGUAGES.map((language) => (
-                          <SelectItem
-                            key={language.value}
-                            value={language.value}
-                          >
-                            {language.label}
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                  </div>
-                </div>
-
-                <div className="flex flex-wrap gap-3">
-                  <Button
-                    onClick={() => void handleTranslate()}
-                    disabled={translating || !docId}
-                    className="h-11 rounded-2xl px-5"
-                  >
-                    {translating ? (
-                      <>
-                        <Spinner className="mr-2 h-4 w-4" />
-                        Translating...
-                      </>
-                    ) : (
-                      <>
-                        <Sparkles className="mr-2 h-4 w-4" />
-                        Translate
-                      </>
-                    )}
-                  </Button>
-
-                  <Button
-                    variant="outline"
-                    className="h-11 rounded-2xl border-border/70 bg-background/80 px-4"
-                    onClick={() => void loadSegments(statusFilter)}
-                    disabled={loading}
-                  >
-                    <RefreshCw
-                      className={cn("h-4 w-4", loading && "animate-spin")}
-                    />
-                  </Button>
-                </div>
-
-                <div className="flex min-w-0 flex-col gap-3 rounded-2xl border border-border/60 bg-background/75 px-4 py-3 sm:flex-row sm:items-center">
-                  <div className="min-w-0 flex-1">
-                    <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">
-                      Export Format
-                    </p>
-                    <Select
-                      value={exportFormat}
-                      onValueChange={(value) =>
-                        setExportFormat(value as ExportFormat)
-                      }
-                    >
-                      <SelectTrigger className="mt-2 h-11 rounded-xl border-border/70 bg-background/90 text-sm">
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="same">Same as source</SelectItem>
-                        <SelectItem value="docx">
-                          Word document - better fidelity
-                        </SelectItem>
-                        <SelectItem value="pdf">PDF document</SelectItem>
-                      </SelectContent>
-                    </Select>
-                  </div>
-                  <Button
-                    variant="outline"
-                    className="h-11 rounded-2xl sm:shrink-0"
-                    onClick={() => void handleExport()}
-                    disabled={exporting || !exportStatus?.ready_to_export}
-                    title={
-                      exportFormat === "docx"
-                        ? "Recommended for stronger layout fidelity."
-                        : undefined
-                    }
-                  >
-                    {exporting ? (
-                      <Spinner className="mr-2 h-4 w-4" />
-                    ) : (
-                      <Download className="mr-2 h-4 w-4" />
-                    )}
-                    Export
-                  </Button>
-                  {!exportStatus?.ready_to_export && exportStatus && (
-                    <Button
-                      variant="ghost"
-                      className="h-11 rounded-2xl sm:shrink-0"
-                      onClick={() => void handleExport()}
-                      disabled={exporting}
-                    >
-                      Export Anyway
-                    </Button>
-                  )}
-                </div>
-              </div>
             </div>
 
-            <div className="grid gap-3 sm:grid-cols-2">
-              {[
-                {
-                  label: "Review progress",
-                  value: `${progress}%`,
-                  note: `${completedCount}/${segments.length} completed`,
-                },
-                {
-                  label: "Approved",
-                  value: `${approvedCount}`,
-                  note: "Finalized and learned",
-                },
-                {
-                  label: "Pending",
-                  value: `${pendingCount}`,
-                  note: "Needs review",
-                },
-                {
-                  label: "Attention needed",
-                  value: `${flaggedCount}`,
-                  note: "Errors or glossary alerts",
-                },
-              ].map((item, index) => (
-                <HoverCard
-                  key={item.label}
-                  initial={{ opacity: 0, y: 20 }}
-                  whileInView={{ opacity: 1, y: 0 }}
-                  viewport={{ once: true, amount: 0.25 }}
-                  transition={{ duration: 0.45, delay: index * 0.06, ease: [0.22, 1, 0.36, 1] }}
-                  className="rounded-[1.5rem] border border-border/60 bg-background/78 p-4 shadow-[0_18px_40px_-34px_rgba(15,23,42,0.55)]"
-                >
-                  <p className="text-xs font-semibold uppercase tracking-[0.18em] text-muted-foreground">
-                    {item.label}
-                  </p>
-                  <p className="mt-3 text-3xl font-semibold tracking-tight text-foreground">
-                    {item.value}
-                  </p>
-                  <p className="mt-1 text-sm text-muted-foreground">
-                    {item.note}
-                  </p>
-                </HoverCard>
-              ))}
+            <div className="hidden lg:block">
+              <div className="relative min-h-[16rem] overflow-hidden rounded-[1.75rem] border border-border/50 bg-[linear-gradient(180deg,rgba(255,255,255,0.72),rgba(245,249,255,0.45))] shadow-[0_28px_80px_-55px_rgba(14,116,144,0.35)] dark:bg-[linear-gradient(180deg,rgba(7,15,28,0.8),rgba(8,16,30,0.56))] dark:shadow-[0_28px_80px_-55px_rgba(8,145,178,0.42)]">
+                <div className="absolute inset-0 bg-[radial-gradient(circle_at_20%_20%,rgba(34,211,238,0.1),transparent_28%),radial-gradient(circle_at_80%_18%,rgba(59,130,246,0.12),transparent_24%),radial-gradient(circle_at_48%_82%,rgba(45,212,191,0.12),transparent_22%)] dark:bg-[radial-gradient(circle_at_20%_20%,rgba(34,211,238,0.12),transparent_28%),radial-gradient(circle_at_80%_18%,rgba(59,130,246,0.14),transparent_24%),radial-gradient(circle_at_48%_82%,rgba(45,212,191,0.12),transparent_22%)]" />
+                <div className="absolute inset-x-0 top-0 z-10 flex items-center justify-between px-5 py-4">
+                  <div>
+                    <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-cyan-700/80 dark:text-cyan-100/75">
+                      Shared with
+                    </p>
+                    <p className="mt-1 text-sm text-slate-600 dark:text-slate-300">
+                      {sharedRecipients.length > 0
+                        ? `${sharedRecipients.length} collaborator${sharedRecipients.length === 1 ? "" : "s"} in this document`
+                        : "Share this file to bring reviewers here"}
+                    </p>
+                  </div>
+                  <div className="rounded-full border border-cyan-300/25 bg-white/60 px-3 py-1 text-xs text-slate-600 dark:border-white/10 dark:bg-white/5 dark:text-slate-300">
+                    Live access
+                  </div>
+                </div>
+
+                {sharedRecipients.length > 0 ? (
+                  <div className="relative h-full min-h-[16rem] mt-10">
+                    {sharedRecipients.slice(0, 6).map((recipient, index) => (
+                      <motion.div
+                        key={`${recipient.clerkUserId}-${index}`}
+                        className={`absolute ${recipientOffsets[index % recipientOffsets.length]}`}
+                        animate={{
+                          y: [0, -10, 0],
+                          rotate: [0, index % 2 === 0 ? 2 : -2, 0],
+                        }}
+                        transition={{
+                          duration: 5.8 + index * 0.35,
+                          repeat: Infinity,
+                          repeatType: "mirror",
+                          ease: "easeInOut",
+                          delay: index * 0.18,
+                        }}
+                      >
+                        <ProfileHoverCard openDelay={120} closeDelay={120}>
+                          <HoverCardTrigger asChild>
+                            <button className="group relative">
+                              <div
+                                className={`absolute inset-0 rounded-full bg-gradient-to-br ${recipientThemes[index % recipientThemes.length]} opacity-50 blur-xl transition-opacity group-hover:opacity-90`}
+                              />
+                              <Avatar className="relative h-16 w-16 border border-white/60 shadow-[0_18px_45px_-25px_rgba(8,145,178,0.45)] dark:border-white/20 dark:shadow-[0_18px_45px_-25px_rgba(8,145,178,0.8)]">
+                                <AvatarFallback
+                                  className={`bg-gradient-to-br ${recipientThemes[index % recipientThemes.length]} text-base font-semibold text-white`}
+                                >
+                                  {getUserInitials(
+                                    recipient.name,
+                                    recipient.email,
+                                  )}
+                                </AvatarFallback>
+                              </Avatar>
+                            </button>
+                          </HoverCardTrigger>
+                          <HoverCardContent
+                            side="top"
+                            align="center"
+                            className="w-56 rounded-2xl border-border/70 bg-background/95 p-4 backdrop-blur"
+                          >
+                            <div className="flex items-center gap-3">
+                              <Avatar className="h-11 w-11 border border-border/60">
+                                <AvatarFallback
+                                  className={`bg-gradient-to-br ${recipientThemes[index % recipientThemes.length]} text-sm font-semibold text-white`}
+                                >
+                                  {getUserInitials(
+                                    recipient.name,
+                                    recipient.email,
+                                  )}
+                                </AvatarFallback>
+                              </Avatar>
+                              <div className="min-w-0">
+                                <p className="truncate text-sm font-semibold text-foreground">
+                                  {recipient.name || "Collaborator"}
+                                </p>
+                                <p className="truncate text-xs text-muted-foreground">
+                                  {recipient.email}
+                                </p>
+                              </div>
+                            </div>
+                          </HoverCardContent>
+                        </ProfileHoverCard>
+                      </motion.div>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="flex min-h-[16rem] items-center justify-center px-8">
+                    <p className="max-w-xs text-center text-sm leading-7 text-slate-500 dark:text-slate-400">
+                      When collaborators open your share link, they'll appear
+                      here as floating presence avatars.
+                    </p>
+                  </div>
+                )}
+              </div>
             </div>
           </div>
         </Reveal>
 
-        <section className="grid items-start gap-4 xl:grid-cols-[minmax(0,1fr)_310px]">
-          <Reveal delay={0.05} className="glass-panel self-start rounded-[1.75rem] border border-border/70 p-5">
+        <section className="grid items-start gap-4">
+          <Reveal
+            delay={0.05}
+            className="glass-panel self-start rounded-[1.75rem] border border-border/70 p-5"
+          >
             <div className="flex flex-col gap-4">
               <div>
                 <p className="text-xs font-semibold uppercase tracking-[0.18em] text-muted-foreground">
                   Review Controls
                 </p>
                 <p className="mt-2 text-sm leading-7 text-muted-foreground">
-                  Filter the queue, keep an eye on progress, and process
-                  segments in focused batches.
+                  Filter the queue, track progress, and take action on segments
+                  without leaving the page.
                 </p>
               </div>
 
-              <div className="w-full rounded-2xl border border-border/60 bg-background/75 p-4 sm:max-w-sm">
+              <div className="w-full rounded-2xl border border-border/60 bg-background/75 p-4 md:max-w-sm">
                 <div className="flex items-center justify-between text-xs font-medium text-muted-foreground">
                   <span>Completion</span>
                   <span className="font-mono">
                     {completedCount}/{segments.length}
                   </span>
                 </div>
-                <div className="mt-3 h-2.5 overflow-hidden rounded-full bg-muted">
+                <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-muted">
                   <div
                     className="h-full rounded-full bg-gradient-to-r from-primary via-sky-400 to-cyan-400 transition-all duration-500"
                     style={{ width: `${progress}%` }}
@@ -1313,106 +1196,126 @@ function TranslatePageContent() {
               </div>
             </div>
 
-            <div className="mt-5 flex flex-wrap gap-2">
-              <Button
-                variant="outline"
-                className="rounded-full"
-                onClick={handleSelectAll}
-              >
-                {allSelected ? "Clear Selection" : "Select All"}
-              </Button>
-              {selectedIds.size > 0 && (
+            <div className="mt-5 grid gap-4 lg:grid-cols-[minmax(0,1fr)_auto]">
+              <div className="grid grid-cols-2 gap-2 sm:flex sm:flex-wrap">
                 <Button
                   variant="outline"
-                  className="rounded-full"
-                  onClick={() => void handleBulkApprove()}
+                  className="h-10 rounded-full"
+                  onClick={() => void loadSegments(statusFilter)}
+                  disabled={loading}
                 >
-                  <CheckCircle2 className="mr-2 h-4 w-4" />
-                  Bulk Accept ({selectedIds.size})
+                  <RefreshCw
+                    className={cn("mr-2 h-4 w-4", loading && "animate-spin")}
+                  />
+                  Refresh
                 </Button>
-              )}
-              <Button
-                variant="outline"
-                className="rounded-full"
-                onClick={() => void handleShare()}
-                disabled={!docId}
-              >
-                <Copy className="mr-2 h-4 w-4" />
-                Share
-              </Button>
-              <Button
-                variant="outline"
-                className="rounded-full"
-                onClick={() => setShowCustomSegmentForm((value) => !value)}
-              >
-                <Plus className="mr-2 h-4 w-4" />
-                Add Custom Segment
-              </Button>
-              {STATUS_FILTERS.map((filter) => {
-                const count =
-                  filter === "all"
-                    ? segments.length
-                    : segments.filter((segment) => segment.status === filter)
-                        .length;
-                return (
-                  <button
-                    key={filter}
-                    onClick={() => setStatusFilter(filter)}
-                    className={cn(
-                      "rounded-full border px-4 py-2 text-sm font-medium capitalize transition-all duration-200",
-                      statusFilter === filter
-                        ? "border-primary bg-primary text-primary-foreground shadow-lg shadow-sky-500/15"
-                        : "border-border/70 bg-background/70 text-muted-foreground hover:border-primary/40 hover:text-foreground",
-                    )}
-                  >
-                    {filter}
-                    {count > 0 && (
-                      <span className="ml-1 opacity-75">({count})</span>
-                    )}
-                  </button>
-                );
-              })}
-            </div>
-
-            {showCustomSegmentForm && (
-              <div className="mt-5 rounded-[1.5rem] border border-border/60 bg-background/75 p-4">
-                <p className="text-xs font-semibold uppercase tracking-[0.18em] text-muted-foreground">
-                  Custom Segment
-                </p>
-                <p className="mt-2 text-sm leading-7 text-muted-foreground">
-                  Add local source text to this workspace. It will appear in the
-                  same document review flow.
-                </p>
-                <Textarea
-                  value={customSourceText}
-                  onChange={(event) => setCustomSourceText(event.target.value)}
-                  placeholder="Add custom source text..."
-                  className="mt-4 min-h-28 rounded-2xl border-border/70 bg-background/90"
-                />
-                <div className="mt-4 flex flex-wrap gap-2">
-                  <Button
-                    className="rounded-2xl"
-                    onClick={handleAddCustomSegment}
-                  >
-                    Save Segment
-                  </Button>
+                <Button
+                  variant="outline"
+                  className="h-10 rounded-full"
+                  onClick={handleSelectAll}
+                >
+                  {allSelected ? "Clear Selection" : "Select All"}
+                </Button>
+                {selectedIds.size > 0 && (
                   <Button
                     variant="outline"
-                    className="rounded-2xl"
-                    onClick={() => {
-                      setCustomSourceText("");
-                      setShowCustomSegmentForm(false);
-                    }}
+                    className="h-10 rounded-full"
+                    onClick={() => void handleBulkApprove()}
                   >
-                    Cancel
+                    <CheckCircle2 className="mr-2 h-4 w-4" />
+                    Bulk Accept ({selectedIds.size})
                   </Button>
-                </div>
-                <p className="mt-3 text-xs leading-6 text-muted-foreground">
-                  This is currently a frontend-only segment because the backend
-                  does not yet expose segment creation.
-                </p>
+                )}
+                <Button
+                  variant="outline"
+                  className="h-10 rounded-full"
+                  onClick={() => void handleShare()}
+                  disabled={!docId}
+                >
+                  <Copy className="mr-2 h-4 w-4" />
+                  Share
+                </Button>
               </div>
-            )}
+
+              <div className="grid grid-cols-2 gap-2 sm:flex sm:flex-wrap sm:justify-end">
+                {STATUS_FILTERS.map((filter) => {
+                  const count =
+                    filter === "all"
+                      ? segments.length
+                      : segments.filter((segment) => segment.status === filter)
+                          .length;
+                  return (
+                    <button
+                      key={filter}
+                      onClick={() => setStatusFilter(filter)}
+                      className={cn(
+                        "min-w-0 rounded-full border px-4 py-2 text-sm font-medium capitalize transition-all duration-200",
+                        statusFilter === filter
+                          ? "border-primary bg-primary text-primary-foreground shadow-lg shadow-sky-500/15"
+                          : "border-border/70 bg-background/70 text-muted-foreground hover:border-primary/40 hover:text-foreground",
+                      )}
+                    >
+                      {filter}
+                      {count > 0 && (
+                        <span className="ml-1 opacity-75">({count})</span>
+                      )}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+              {[
+                {
+                  label: "Review",
+                  value: `${progress}%`,
+                  note: `${completedCount}/${segments.length} completed`,
+                  borderColor: "border-primary",
+                },
+                {
+                  label: "Approved",
+                  value: `${approvedCount}`,
+                  note: "Finalized",
+                  borderColor: "border-emerald-300",
+                },
+                {
+                  label: "Pending",
+                  value: `${pendingCount}`,
+                  note: "Needs review",
+                  borderColor: "border-amber-300",
+                },
+                {
+                  label: "Attention",
+                  value: `${flaggedCount}`,
+                  note: "Errors or alerts",
+                  borderColor: "border-red-300",
+                },
+              ].map((item, index) => (
+                <HoverCard
+                  key={item.label}
+                  initial={{ opacity: 0, y: 18 }}
+                  whileInView={{ opacity: 1, y: 0 }}
+                  viewport={{ once: true, amount: 0.25 }}
+                  transition={{
+                    duration: 0.4,
+                    delay: index * 0.05,
+                    ease: [0.22, 1, 0.36, 1],
+                  }}
+                  className={`rounded-[1.25rem] border border-border/60 bg-background/78 p-3.5 shadow-[0_18px_40px_-34px_rgba(15,23,42,0.55)] ${item.borderColor}`}
+                >
+                  <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-muted-foreground">
+                    {item.label}
+                  </p>
+                  <p className="mt-2 text-2xl font-semibold tracking-tight text-foreground">
+                    {item.value}
+                  </p>
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    {item.note}
+                  </p>
+                </HoverCard>
+              ))}
+            </div>
 
             {translationMessage && !translating && (
               <div
@@ -1446,34 +1349,78 @@ function TranslatePageContent() {
                 </div>
               </div>
             )}
-          </Reveal>
 
-          <Reveal delay={0.1} className="glass-panel self-start rounded-[1.75rem] border border-border/70 p-5">
-            <p className="text-xs font-semibold uppercase tracking-[0.18em] text-muted-foreground">
-              Legend
-            </p>
-            <div className="mt-4 space-y-3">
-              {(["pending", "reviewed", "approved"] as const).map((status) => (
-                <div
-                  key={status}
-                  className="motion-card-subtle flex items-center justify-between rounded-2xl border border-border/60 bg-background/70 px-3 py-2"
+            <div className="mt-5 grid gap-3 rounded-[1.5rem] border border-border/60 bg-background/75 p-4 xl:grid-cols-[minmax(0,0.9fr)_minmax(0,0.9fr)_auto] xl:items-end">
+              <div className="min-w-0">
+                <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">
+                  Target Language
+                </p>
+                <Select value={targetLang} onValueChange={setTargetLang}>
+                  <SelectTrigger className="mt-2 h-11 rounded-xl border-border/70 bg-background/90 text-sm">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {LANGUAGES.map((language) => (
+                      <SelectItem key={language.value} value={language.value}>
+                        {language.label}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+
+              <div className="min-w-0">
+                <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">
+                  Export Format
+                </p>
+                <Select
+                  value={exportFormat}
+                  onValueChange={(value) =>
+                    setExportFormat(value as ExportFormat)
+                  }
                 >
-                  <span className="text-sm text-foreground capitalize">
-                    {status}
-                  </span>
-                  <StatusPill status={status} />
-                </div>
-              ))}
-            </div>
+                  <SelectTrigger className="mt-2 h-11 rounded-xl border-border/70 bg-background/90 text-sm">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="same">Same as source</SelectItem>
+                    <SelectItem value="docx">
+                      Word document - better fidelity
+                    </SelectItem>
+                    <SelectItem value="pdf">PDF document</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
 
-            <div className="motion-card-subtle mt-5 rounded-2xl border border-border/60 bg-background/70 p-4">
-              <p className="text-xs font-semibold uppercase tracking-[0.18em] text-muted-foreground">
-                TM Match Types
-              </p>
-              <div className="mt-3 flex flex-wrap gap-2">
-                <TmMatchBadge tmMatchType="exact" />
-                <TmMatchBadge tmMatchType="fuzzy" />
-                <TmMatchBadge tmMatchType="new" />
+              <div className="grid gap-2 sm:grid-cols-2 xl:w-auto xl:min-w-[14rem]">
+                <Button
+                  className="h-11 rounded-2xl"
+                  onClick={() => void handleTranslate()}
+                  disabled={translating || !docId}
+                >
+                  {translating ? (
+                    <>
+                      <Spinner className="mr-2 h-4 w-4" />
+                      Translating...
+                    </>
+                  ) : (
+                    <>
+                      <Sparkles className="mr-2 h-4 w-4" />
+                      Translate
+                    </>
+                  )}
+                </Button>
+                <Button
+                  variant="outline"
+                  className="h-11 rounded-2xl"
+                  onClick={() => void handleExport()}
+                  disabled={exporting || !exportStatus?.ready_to_export}
+                >
+                  {exporting ? (
+                    <Spinner className="mr-2 h-4 w-4" />
+                  ) : null}
+                  Export
+                </Button>
               </div>
             </div>
           </Reveal>

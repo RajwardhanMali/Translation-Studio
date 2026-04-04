@@ -57,9 +57,7 @@ export default async function HomePage() {
               <Languages className="h-5 w-5" />
             </div>
             <div>
-              <p className="text-sm font-semibold text-foreground">
-                Translation Studio
-              </p>
+              <p className="text-sm font-semibold text-foreground">SynTra AI</p>
               <p className="text-xs text-muted-foreground">
                 AI workflow for premium multilingual delivery
               </p>
@@ -91,7 +89,10 @@ export default async function HomePage() {
 
         <div className="grid items-center gap-12 pb-10 pt-14 lg:grid-cols-[1.05fr_0.95fr] lg:pt-20">
           <div className="space-y-8">
-            <Reveal delay={0.08} className="inline-flex items-center gap-2 rounded-full border border-cyan-200/70 bg-white/70 px-4 py-2 text-xs font-semibold uppercase tracking-[0.24em] text-sky-800 shadow-sm backdrop-blur dark:border-cyan-300/20 dark:bg-cyan-400/10 dark:text-cyan-100">
+            <Reveal
+              delay={0.08}
+              className="inline-flex items-center gap-2 rounded-full border border-cyan-200/70 bg-white/70 px-4 py-2 text-xs font-semibold uppercase tracking-[0.24em] text-sky-800 shadow-sm backdrop-blur dark:border-cyan-300/20 dark:bg-cyan-400/10 dark:text-cyan-100"
+            >
               <Sparkles className="h-3.5 w-3.5" />
               Market-ready translation experience
             </Reveal>
@@ -102,7 +103,7 @@ export default async function HomePage() {
                 files you deliver.
               </h1>
               <p className="max-w-2xl text-base leading-8 text-muted-foreground md:text-lg">
-                Translation Studio helps teams move from raw source documents to
+                SynTra AI helps teams move from raw source documents to
                 export-ready multilingual assets through a calmer, more
                 beautiful workflow for validation, translation, review, and
                 collaboration.
@@ -184,7 +185,13 @@ export default async function HomePage() {
             <FloatLayer className="absolute -left-8 top-10 hidden h-32 w-32 rounded-full bg-cyan-300/35 blur-3xl lg:block" />
             <FloatLayer
               className="absolute -right-8 bottom-8 hidden h-36 w-36 rounded-full bg-teal-300/25 blur-3xl lg:block"
-              transition={{ duration: 8, repeat: Infinity, repeatType: 'mirror', ease: 'easeInOut', delay: 0.6 }}
+              transition={{
+                duration: 8,
+                repeat: Infinity,
+                repeatType: "mirror",
+                ease: "easeInOut",
+                delay: 0.6,
+              }}
             />
 
             <HoverCard className="relative overflow-hidden rounded-[2rem] border border-white/35 bg-[linear-gradient(180deg,rgba(255,255,255,0.78),rgba(248,251,255,0.88))] p-4 shadow-[0_35px_120px_-50px_rgba(16,24,40,0.55)] backdrop-blur dark:border-white/10 dark:bg-[linear-gradient(180deg,rgba(15,23,42,0.9),rgba(7,12,24,0.96))] dark:shadow-[0_35px_120px_-50px_rgba(2,8,23,1)] xl:p-6">

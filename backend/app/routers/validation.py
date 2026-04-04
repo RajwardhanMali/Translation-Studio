@@ -1,6 +1,9 @@
 """
 Validation router.
 POST /validate — validate source text for spelling, grammar, and consistency.
+Supports hybrid deterministic + AI-powered validation via `enable_ai` flag.
+When validating by document_id, automatically loads document classification
+context (type, domain, register) to provide domain-aware validation.
 """
 
 import logging
@@ -22,9 +25,13 @@ async def validate(request: ValidateRequest):
 
     Modes:
     - Provide `document_id` → validate all segments of that document.
+      Automatically loads document classification for context-aware validation.
     - Provide `text`        → validate a single arbitrary text string.
 
     Set `auto_fix: true` to receive corrected text alongside issues.
+    Set `enable_ai: true` to activate LLM-powered context-aware validation
+    (catches grammar in context, wrong-word errors, style issues, and
+    cross-document terminology inconsistencies).
     """
     results: List[ValidationResult] = []
 
@@ -37,9 +44,14 @@ async def validate(request: ValidateRequest):
                 detail=f"Document '{request.document_id}' not found.",
             )
 
+        # Load document classification context (if available)
+        classification = data.get("metadata", {}).get("classification", {})
+
         raw_results = validate_segments(
             segments=data.get("segments", []),
             auto_fix=request.auto_fix,
+            enable_ai=request.enable_ai,
+            document_context=classification if classification else None,
         )
         for r in raw_results:
             results.append(ValidationResult(
@@ -53,8 +65,12 @@ async def validate(request: ValidateRequest):
             ))
 
     elif request.text:
-        # Validate arbitrary text
-        r = validate_text(text=request.text, auto_fix=request.auto_fix)
+        # Validate arbitrary text (no document context available)
+        r = validate_text(
+            text=request.text,
+            auto_fix=request.auto_fix,
+            enable_ai=request.enable_ai,
+        )
         results.append(ValidationResult(
             text=r["text"],
             issues=r["issues"],
