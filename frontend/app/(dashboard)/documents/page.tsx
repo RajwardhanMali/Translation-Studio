@@ -15,15 +15,16 @@ import {
   AlertDialogTitle,
   AlertDialogTrigger,
 } from '@/components/ui/alert-dialog'
-import { AppShell } from '@/components/app-shell'
+import { LayoutHeader } from '@/components/layout-context'
+import { useDocuments, useShareOverview } from '@/hooks/use-dashboard-data'
+import { createShareLink, deleteDocument, DocumentSummary } from '@/lib/api'
+import { cn } from '@/lib/utils'
 import { Badge } from '@/components/ui/badge'
-import { Button } from '@/components/ui/button'
-import { Card } from '@/components/ui/card'
 import { HoverCard, Reveal } from '@/components/motion/primitives'
+import { Button } from '@/components/ui/button'
 import { Spinner } from '@/components/ui/spinner'
 import { useToast } from '@/hooks/use-toast'
-import { createShareLink, deleteDocument, getDocuments, getShareOverview, type DocumentSummary, type ShareOverviewResponse } from '@/lib/api'
-import { cn } from '@/lib/utils'
+import { Card } from '@/components/ui/card'
 
 function formatRelativeTime(value: string) {
   const target = new Date(value).getTime()
@@ -202,69 +203,22 @@ function DocumentCard({
 export default function DocumentsPage() {
   const router = useRouter()
   const { toast } = useToast()
-  const [documents, setDocuments] = useState<DocumentSummary[]>([])
-  const [loading, setLoading] = useState(true)
+  
+  // Use SWR hooks for caching and deduplication
+  const { documents, isLoading: loading, mutate: mutateDocs } = useDocuments()
+  const { shareOverview, mutate: mutateShares } = useShareOverview()
+  
   const [refreshing, setRefreshing] = useState(false)
   const [deletingId, setDeletingId] = useState<string | null>(null)
-  const isFetchingRef = useRef(false)
-  const [shareOverview, setShareOverview] = useState<ShareOverviewResponse>({
-    ownedByDocument: {},
-    visibleByDocument: {},
-    receivedDocumentIds: [],
-  })
 
-  const loadDocuments = useCallback(async (silent = false) => {
-    // Prevent overlapping calls
-    if (isFetchingRef.current) {
-      console.log('Skipping loadDocuments: already fetching...')
-      return
-    }
-
-    isFetchingRef.current = true
-    if (silent) setRefreshing(true)
-    else setLoading(true)
-
-    console.log(`Fetching documents library (silent=${silent})...`)
-    const startTime = Date.now()
-
+  const handleRefresh = async () => {
+    setRefreshing(true)
     try {
-      const [data, shareData] = await Promise.all([
-        getDocuments(),
-        getShareOverview().catch((err) => {
-          console.warn('Share overview failed to load:', err)
-          return {
-            ownedByDocument: {},
-            visibleByDocument: {},
-            receivedDocumentIds: [],
-          }
-        }),
-      ])
-
-      const duration = Date.now() - startTime
-      console.log(`Documents loaded in ${duration}ms. Count: ${data?.length ?? 0}`)
-      
-      setDocuments(data || [])
-      setShareOverview(shareData)
-    } catch (err) {
-      console.error('Failed to load documents:', err)
-      toast({
-        title: 'Failed to load documents',
-        description: 'Could not fetch your document library from the backend.',
-        variant: 'destructive',
-      })
-      // Only clear list if it was a hard error (not silent)
-      if (!silent) setDocuments([])
+      await Promise.all([mutateDocs(), mutateShares()])
     } finally {
-      setLoading(false)
       setRefreshing(false)
-      isFetchingRef.current = false
     }
-  }, [toast])
-
-  useEffect(() => {
-    // Initial load
-    void loadDocuments()
-  }, [loadDocuments])
+  }
 
   const totals = useMemo(
     () =>
@@ -285,7 +239,7 @@ export default function DocumentsPage() {
     setDeletingId(id)
     try {
       await deleteDocument(id)
-      setDocuments((prev) => prev.filter((doc) => doc.id !== id))
+      await mutateDocs() // Refresh cache
       toast({ title: 'Document deleted', description: 'The document was removed from your library.' })
     } catch {
       toast({
@@ -317,10 +271,11 @@ export default function DocumentsPage() {
   }
 
   return (
-    <AppShell
-      title="Documents"
-      subtitle="Browse uploaded files, track progress, and reopen any document."
-    >
+    <>
+      <LayoutHeader
+        title="Documents"
+        subtitle="Browse uploaded files, track progress, and reopen any document."
+      />
       <div className="space-y-5">
         <Reveal className="hero-sheen overflow-hidden rounded-[2rem] border border-border/70">
           <div className="grid gap-6 px-6 py-7 lg:grid-cols-[1.2fr_0.8fr] lg:px-8">
@@ -346,7 +301,7 @@ export default function DocumentsPage() {
                 </div>
               </div>
               <div className="mt-4 flex flex-wrap gap-2">
-                <Button variant="outline" className="rounded-2xl" onClick={() => void loadDocuments(true)} disabled={refreshing}>
+                <Button variant="outline" className="rounded-2xl" onClick={handleRefresh} disabled={refreshing}>
                   <RefreshCw className={cn('mr-2 h-4 w-4', refreshing && 'animate-spin')} />
                   Refresh
                 </Button>
@@ -416,6 +371,6 @@ export default function DocumentsPage() {
           </motion.div>
         )}
       </div>
-    </AppShell>
+    </>
   )
 }

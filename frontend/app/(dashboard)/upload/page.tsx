@@ -3,7 +3,7 @@
 import { useState, useCallback, useRef } from 'react'
 import { useRouter } from 'next/navigation'
 import { Upload, FileText, File, CheckCircle2, AlertCircle, X, ArrowRight, ShieldCheck } from 'lucide-react'
-import { AppShell } from '@/components/app-shell'
+import { LayoutHeader } from '@/components/layout-context'
 import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
 import { Progress } from '@/components/ui/progress'
@@ -133,10 +133,11 @@ export default function UploadPage() {
   const fileIcon = selectedFile?.type === 'application/pdf' ? FileText : File
 
   return (
-    <AppShell
-      title="Upload A New Document"
-      subtitle="Bring in a PDF or DOCX and move straight into validation, translation, and reviewer approval."
-    >
+    <>
+      <LayoutHeader
+        title="Upload A New Document"
+        subtitle="Bring in a PDF or DOCX and move straight into validation, translation, and reviewer approval."
+      />
       <div className="space-y-6">
         <section className="hero-sheen overflow-hidden rounded-[1.75rem] border border-border/70">
           <div className="grid gap-6 px-6 py-6 lg:grid-cols-[minmax(0,1fr)_300px] lg:items-end lg:px-8">
@@ -349,6 +350,6 @@ export default function UploadPage() {
           </div>
         </div>
       </div>
-    </AppShell>
+    </>
   )
 }
