@@ -1,29 +1,41 @@
 'use client'
 
 import { Suspense, useEffect, useMemo, useState } from 'react'
+import { AnimatePresence, motion } from 'framer-motion'
 import { useRouter, useSearchParams } from 'next/navigation'
 import { AlertTriangle, ArrowRight, CheckCircle2, ChevronDown, ChevronUp, Info, RefreshCw, ShieldCheck, Wand2 } from 'lucide-react'
 import { AppShell } from '@/components/app-shell'
+import { HoverCard, Reveal } from '@/components/motion/primitives'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
 import { Spinner } from '@/components/ui/spinner'
+import { Textarea } from '@/components/ui/textarea'
 import { useToast } from '@/hooks/use-toast'
-import { approveSegment, validateDocument, type ValidationIssue, type ValidationResult } from '@/lib/api'
+import {
+  applyValidationFixes,
+  editValidationSegment,
+  validateDocument,
+  type ValidationIssue,
+  type ValidationResult,
+} from '@/lib/api'
 import { cn } from '@/lib/utils'
 
 function SeverityBadge({ severity }: { severity: ValidationIssue['severity'] }) {
+  const isError = severity === 'error'
   const isWarning = severity === 'warning'
   return (
     <span
       className={cn(
         'inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide',
-        isWarning
+        isError
+          ? 'border-red-200 bg-red-50 text-red-700 dark:border-red-800/60 dark:bg-red-950/40 dark:text-red-200'
+          : isWarning
           ? 'border-amber-200 bg-amber-50 text-amber-700 dark:border-amber-800/60 dark:bg-amber-950/40 dark:text-amber-200'
           : 'border-sky-200 bg-sky-50 text-sky-700 dark:border-sky-800/60 dark:bg-sky-950/40 dark:text-sky-200'
       )}
     >
-      {isWarning ? <AlertTriangle className="h-2.5 w-2.5" /> : <Info className="h-2.5 w-2.5" />}
+      {isError ? <AlertTriangle className="h-2.5 w-2.5" /> : isWarning ? <AlertTriangle className="h-2.5 w-2.5" /> : <Info className="h-2.5 w-2.5" />}
       {severity}
     </span>
   )
@@ -32,27 +44,41 @@ function SeverityBadge({ severity }: { severity: ValidationIssue['severity'] }) 
 function ValidationCard({
   result,
   showInfo,
-  onApplyFix,
-  applying,
+  onApplyAiFix,
+  onApplyManualEdit,
+  applyingAi,
+  applyingManual,
 }: {
   result: ValidationResult
   showInfo: boolean
-  onApplyFix: () => Promise<void>
-  applying: boolean
+  onApplyAiFix: () => Promise<void>
+  onApplyManualEdit: (nextText: string) => Promise<void>
+  applyingAi: boolean
+  applyingManual: boolean
 }) {
   const [expanded, setExpanded] = useState(true)
-  const visibleIssues = showInfo ? result.issues : result.issues.filter((issue) => issue.severity === 'warning')
+  const [manualDraft, setManualDraft] = useState(result.auto_fixed_text ?? result.text ?? '')
+  const visibleIssues = showInfo ? result.issues : result.issues.filter((issue) => issue.severity === 'warning' || issue.severity === 'error')
   const hiddenInfoCount = result.issues.length - visibleIssues.length
+  const hasError = visibleIssues.some((issue) => issue.severity === 'error')
   const hasWarning = visibleIssues.some((issue) => issue.severity === 'warning')
 
+  useEffect(() => {
+    setManualDraft(result.auto_fixed_text ?? result.text ?? '')
+  }, [result.auto_fixed_text, result.text])
+
   return (
-    <Card className="overflow-hidden rounded-2xl border-border/70">
+    <HoverCard layout className="overflow-hidden rounded-2xl border border-border/70 bg-card">
       <button
         className="flex w-full items-start gap-3 px-4 py-4 text-left transition-colors hover:bg-muted/30"
         onClick={() => setExpanded((value) => !value)}
       >
-        <div className={cn('mt-0.5 rounded-full p-1', hasWarning ? 'bg-amber-100 text-amber-700 dark:bg-amber-950/40 dark:text-amber-200' : 'bg-sky-100 text-sky-700 dark:bg-sky-950/40 dark:text-sky-200')}>
-          {hasWarning ? <AlertTriangle className="h-3.5 w-3.5" /> : <Info className="h-3.5 w-3.5" />}
+        <div className={cn('mt-0.5 rounded-full p-1', 
+          hasError ? 'bg-red-100 text-red-700 dark:bg-red-950/40 dark:text-red-200' :
+          hasWarning ? 'bg-amber-100 text-amber-700 dark:bg-amber-950/40 dark:text-amber-200' : 
+          'bg-sky-100 text-sky-700 dark:bg-sky-950/40 dark:text-sky-200'
+        )}>
+          {hasError ? <AlertTriangle className="h-3.5 w-3.5" /> : hasWarning ? <AlertTriangle className="h-3.5 w-3.5" /> : <Info className="h-3.5 w-3.5" />}
         </div>
 
         <div className="min-w-0 flex-1">
@@ -96,21 +122,58 @@ function ValidationCard({
             </div>
           ))}
 
-          {result.auto_fixed_text && result.segment_id && (
-            <div className="flex flex-wrap items-center gap-3 rounded-2xl border border-border/60 bg-background/70 p-3">
-              <div className="min-w-0 flex-1">
-                <p className="text-xs font-medium text-foreground">Suggested correction</p>
-                <p className="mt-1 text-sm text-muted-foreground">{result.auto_fixed_text}</p>
+          {result.segment_id && (
+            <div className={cn('grid gap-3', result.auto_fixed_text ? 'xl:grid-cols-2' : undefined)}>
+              {result.auto_fixed_text ? (
+                <div className="rounded-2xl border border-border/60 bg-background/70 p-3">
+                  <div className="min-w-0">
+                    <p className="text-xs font-medium text-foreground">AI suggested correction</p>
+                    <div className="mt-3 rounded-2xl border border-border/60 bg-background/90 px-4 py-3 text-sm leading-7 text-foreground">
+                      {result.auto_fixed_text}
+                    </div>
+                  </div>
+                  <div className="mt-3 flex justify-end">
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="rounded-xl"
+                      onClick={() => void onApplyAiFix()}
+                      disabled={applyingAi}
+                    >
+                      {applyingAi ? <Spinner className="mr-1.5 h-3.5 w-3.5" /> : <Wand2 className="mr-1.5 h-3.5 w-3.5" />}
+                      Apply AI fix
+                    </Button>
+                  </div>
+                </div>
+              ) : null}
+
+              <div className="rounded-2xl border border-border/60 bg-background/70 p-3">
+                <div className="min-w-0">
+                  <p className="text-xs font-medium text-foreground">Manual correction</p>
+                  <Textarea
+                    value={manualDraft}
+                    onChange={(event) => setManualDraft(event.target.value)}
+                    className="mt-3 min-h-24 rounded-2xl border-border/70 bg-background/90 text-sm leading-7"
+                  />
+                </div>
+                <div className="mt-3 flex justify-end">
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="rounded-xl"
+                    onClick={() => void onApplyManualEdit(manualDraft)}
+                    disabled={applyingManual || !manualDraft.trim()}
+                  >
+                    {applyingManual ? <Spinner className="mr-1.5 h-3.5 w-3.5" /> : null}
+                    Save manual edit
+                  </Button>
+                </div>
               </div>
-              <Button size="sm" variant="outline" className="rounded-xl" onClick={() => void onApplyFix()} disabled={applying}>
-                {applying ? <Spinner className="mr-1.5 h-3.5 w-3.5" /> : <Wand2 className="mr-1.5 h-3.5 w-3.5" />}
-                Apply
-              </Button>
             </div>
           )}
         </div>
       )}
-    </Card>
+    </HoverCard>
   )
 }
 
@@ -124,7 +187,8 @@ function ValidationPageContent() {
   const [results, setResults] = useState<ValidationResult[]>([])
   const [hasLoaded, setHasLoaded] = useState(false)
   const [showInfo, setShowInfo] = useState(false)
-  const [applyingId, setApplyingId] = useState<string | null>(null)
+  const [applyingAiId, setApplyingAiId] = useState<string | null>(null)
+  const [manualEditId, setManualEditId] = useState<string | null>(null)
 
   const loadValidation = async (autoFix = true) => {
     setLoading(true)
@@ -166,40 +230,63 @@ function ValidationPageContent() {
           }
           return acc
         },
-        { warning: 0, info: 0 }
+        { error: 0, warning: 0, info: 0 }
       ),
     [results]
   )
 
   const visibleResults = useMemo(() => {
     if (showInfo) return results
-    return results.filter((result) => result.issues.some((issue) => issue.severity === 'warning'))
+    return results.filter((result) => result.issues.some((issue) => issue.severity === 'warning' || issue.severity === 'error'))
   }, [results, showInfo])
 
-  const handleApplyFix = async (result: ValidationResult) => {
-    if (!result.segment_id || !result.auto_fixed_text) return
+  const handleApplyAiFix = async (result: ValidationResult) => {
+    if (!docId || !result.segment_id) return
 
-    setApplyingId(result.segment_id)
+    setApplyingAiId(result.segment_id)
     try {
-      await approveSegment(result.segment_id, false, result.auto_fixed_text)
+      const response = await applyValidationFixes(docId, [result.segment_id])
       setResults((prev) =>
-        prev
-          .map((item) =>
-            item.segment_id === result.segment_id
-              ? { ...item, text: result.auto_fixed_text ?? item.text, issues: [], has_errors: false, has_warnings: false }
-              : item
-          )
-          .filter((item) => item.issues.length > 0)
+        prev.filter((item) => !response.fixes.some((fix) => fix.segment_id === item.segment_id))
       )
-      toast({ title: 'Fix applied', description: 'The correction was sent back to the document.' })
+      const appliedFix = response.fixes.find((fix) => fix.segment_id === result.segment_id)
+      toast({
+        title: 'AI fix applied',
+        description: appliedFix
+          ? `${appliedFix.issues_fixed} issue${appliedFix.issues_fixed === 1 ? '' : 's'} resolved.`
+          : 'The AI suggestion was written back to the source.',
+      })
     } catch {
       toast({
-        title: 'Could not apply fix',
-        description: 'The correction could not be saved to the backend.',
+        title: 'Could not apply AI fix',
+        description: 'The AI suggestion could not be saved to the backend.',
         variant: 'destructive',
       })
     } finally {
-      setApplyingId(null)
+      setApplyingAiId(null)
+    }
+  }
+
+  const handleManualEdit = async (result: ValidationResult, nextText: string) => {
+    const trimmedText = nextText.trim()
+    if (!docId || !result.segment_id || !trimmedText) return
+
+    setManualEditId(result.segment_id)
+    try {
+      await editValidationSegment(docId, result.segment_id, trimmedText)
+      setResults((prev) => prev.filter((item) => item.segment_id !== result.segment_id))
+      toast({
+        title: 'Manual edit saved',
+        description: 'The segment source text was updated and persisted.',
+      })
+    } catch {
+      toast({
+        title: 'Could not save manual edit',
+        description: 'The manual correction could not be saved to the backend.',
+        variant: 'destructive',
+      })
+    } finally {
+      setManualEditId(null)
     }
   }
 
@@ -207,8 +294,9 @@ function ValidationPageContent() {
     <AppShell
       title="Validation"
       subtitle={docId ? `Document ${docId.slice(0, 20)}...` : 'Validation results'}
-      actions={
-        <div className="flex gap-2">
+    >
+      <div className="mx-auto max-w-4xl space-y-5">
+        <Reveal className="flex flex-wrap justify-end gap-2">
           <Button variant="outline" size="sm" className="rounded-xl" onClick={() => void loadValidation(true)} disabled={loading}>
             <RefreshCw className={cn('mr-1.5 h-3.5 w-3.5', loading && 'animate-spin')} />
             Re-check
@@ -217,17 +305,23 @@ function ValidationPageContent() {
             Continue
             <ArrowRight className="ml-1.5 h-3.5 w-3.5" />
           </Button>
-        </div>
-      }
-    >
-      <div className="mx-auto max-w-4xl space-y-5">
-        <div className="grid gap-4 sm:grid-cols-3">
+        </Reveal>
+
+        <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
           {[
-            { label: 'Segments with issues', value: results.length, icon: ShieldCheck },
-            { label: 'Warnings', value: counts.warning, icon: AlertTriangle },
-            { label: 'Info', value: counts.info, icon: Info },
-          ].map((item) => (
-            <Card key={item.label} className="rounded-2xl border-border/70 p-4">
+            { label: 'Segments with issues', value: results.length, icon: ShieldCheck, borderColor: 'border-border/70' },
+            { label: 'Errors', value: counts.error, icon: AlertTriangle, borderColor: 'border-red-200 dark:border-red-800/60' },
+            { label: 'Warnings', value: counts.warning, icon: AlertTriangle, borderColor: 'border-amber-200 dark:border-amber-800/60' },
+            { label: 'Info', value: counts.info, icon: Info, borderColor: 'border-sky-200 dark:border-sky-800/60' },
+          ].map((item, index) => (
+            <motion.div
+              key={item.label}
+              initial={{ opacity: 0, y: 18 }}
+              whileInView={{ opacity: 1, y: 0 }}
+              viewport={{ once: true, amount: 0.25 }}
+              transition={{ duration: 0.45, delay: index * 0.07, ease: [0.22, 1, 0.36, 1] }}
+            >
+            <Card className={cn("rounded-2xl border p-4", item.borderColor)}>
               <div className="flex items-center gap-3">
                 <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-muted">
                   <item.icon className="h-4 w-4 text-foreground" />
@@ -238,6 +332,7 @@ function ValidationPageContent() {
                 </div>
               </div>
             </Card>
+            </motion.div>
           ))}
         </div>
 
@@ -254,7 +349,7 @@ function ValidationPageContent() {
           </Card>
         ) : hasLoaded ? (
           <div className="space-y-4">
-            <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-border/70 bg-background/70 px-4 py-3">
+            <Reveal className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-border/70 bg-background/70 px-4 py-3">
               <p className="text-sm text-foreground">
                 {results.length} segment{results.length === 1 ? '' : 's'} need attention.
               </p>
@@ -263,22 +358,34 @@ function ValidationPageContent() {
                   {showInfo ? 'Hide info items' : `Show info items (${counts.info})`}
                 </button>
               )}
-            </div>
+            </Reveal>
 
             {visibleResults.length === 0 ? (
               <Card className="rounded-2xl border-border/70 p-5 text-sm text-muted-foreground">
                 Only informational notes were returned. Turn on info items to review them.
               </Card>
             ) : (
-              visibleResults.map((result, index) => (
-                <ValidationCard
-                  key={result.segment_id ?? `${result.text}-${index}`}
-                  result={result}
-                  showInfo={showInfo}
-                  onApplyFix={() => handleApplyFix(result)}
-                  applying={applyingId === result.segment_id}
-                />
-              ))
+              <AnimatePresence mode="popLayout">
+                {visibleResults.map((result, index) => (
+                  <motion.div
+                    key={result.segment_id ?? `${result.text}-${index}`}
+                    layout
+                    initial={{ opacity: 0, y: 18 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    exit={{ opacity: 0, y: -10 }}
+                    transition={{ duration: 0.35, delay: index * 0.03, ease: [0.22, 1, 0.36, 1] }}
+                  >
+                    <ValidationCard
+                      result={result}
+                      showInfo={showInfo}
+                      onApplyAiFix={() => handleApplyAiFix(result)}
+                      onApplyManualEdit={(nextText) => handleManualEdit(result, nextText)}
+                      applyingAi={applyingAiId === result.segment_id}
+                      applyingManual={manualEditId === result.segment_id}
+                    />
+                  </motion.div>
+                ))}
+              </AnimatePresence>
             )}
           </div>
         ) : null}

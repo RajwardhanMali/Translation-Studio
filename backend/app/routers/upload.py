@@ -1,6 +1,6 @@
 """
 Upload router.
-POST /upload — accepts PDF or DOCX, parses it, and stores parsed + segmented data.
+POST /upload — accepts PDF or DOCX, parses it, classifies it, and stores parsed + segmented data.
 """
 
 import uuid
@@ -13,6 +13,7 @@ from fastapi import APIRouter, UploadFile, File, HTTPException, BackgroundTasks
 from app.models.schemas import UploadResponse
 from app.services.parser import parse_document
 from app.services.segmenter import segment_blocks
+from app.services.document_classifier import classify_document
 from app.utils.file_handler import (
     save_parsed_document,
     save_segmented_document,
@@ -35,8 +36,8 @@ async def upload_document(
     file: UploadFile = File(...),
 ):
     """
-    Accept a PDF or DOCX file, parse its structure, segment it,
-    and persist both representations to disk.
+    Accept a PDF or DOCX file, parse its structure, classify the document type,
+    segment it, and persist all representations to disk.
 
     Returns a document ID that can be used in subsequent API calls.
     """
@@ -75,17 +76,48 @@ async def upload_document(
         logger.error(f"Parsing failed for {file.filename}: {e}")
         raise HTTPException(status_code=422, detail=f"Document parsing failed: {e}")
 
+    # -----------------------------------------------------------------------
+    # 3.5. Classify document type (1 LLM call)
+    # -----------------------------------------------------------------------
+    # Extract text sample from first blocks for classification
+    text_sample = " ".join(
+        b.get("text", "") for b in blocks
+        if b.get("text") and b.get("block_type") not in {"spacer", "table_start", "table_end", "image"}
+    )[:2000]
+
+    try:
+        classification = classify_document(text_sample)
+        logger.info(
+            f"Document classified: type={classification['document_type']}, "
+            f"domain={classification['domain']}, confidence={classification['confidence']:.2f}"
+        )
+    except Exception as e:
+        logger.warning(f"Document classification failed (non-critical): {e}")
+        classification = {
+            "document_type": "general",
+            "confidence": 0.0,
+            "domain": "general",
+            "register": "formal",
+            "domain_keywords": [],
+        }
+
+    # -----------------------------------------------------------------------
+    # 4. Save parsed document with classification metadata
+    # -----------------------------------------------------------------------
     parsed_doc = {
         "id":        document_id,
         "filename":  file.filename,
         "file_type": file_type,
         "blocks":    blocks,
+        "metadata":  {
+            "classification": classification,
+        },
     }
     save_parsed_document(document_id, parsed_doc)
     logger.info(f"Parsed {len(blocks)} blocks from '{file.filename}'")
 
     # -----------------------------------------------------------------------
-    # 4. Segment document (can be done in background for large docs)
+    # 5. Segment document
     # -----------------------------------------------------------------------
     try:
         segments = segment_blocks(blocks)
@@ -96,6 +128,9 @@ async def upload_document(
     segmented_doc = {
         "document_id": document_id,
         "segments":    segments,
+        "metadata":    {
+            "classification": classification,
+        },
     }
     save_segmented_document(document_id, segmented_doc)
     logger.info(f"Segmented into {len(segments)} segments.")
@@ -105,8 +140,12 @@ async def upload_document(
         filename=file.filename,
         file_type=file_type,
         blocks_parsed=len(blocks),
+        document_type=classification.get("document_type"),
+        domain=classification.get("domain"),
+        doc_register=classification.get("register"),
         message=(
             f"Document uploaded and processed successfully. "
-            f"{len(segments)} segments created."
+            f"{len(segments)} segments created. "
+            f"Classified as: {classification['document_type']} ({classification['domain']})"
         ),
     )

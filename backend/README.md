@@ -1,4 +1,4 @@
-# 🌐 Translation Studio — Backend API
+# 🌐 Syntra AI : AI Translation Studio — Backend API
 
 AI-powered translation backend built with FastAPI, FAISS, spaCy, sentence-transformers, and Groq (Qwen).
 
