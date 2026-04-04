@@ -77,6 +77,7 @@ const LANGUAGES = [
   { value: "ja", label: "Japanese (ja)" },
   { value: "ar", label: "Arabic (ar)" },
   { value: "hi", label: "Hindi (hi)" },
+  { value: "en", label: "English (en)" },
 ];
 
 const STATUS_FILTERS = ["all", "pending", "reviewed", "approved"] as const;
