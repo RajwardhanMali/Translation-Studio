@@ -206,6 +206,9 @@ class UploadResponse(BaseModel):
     file_type: str
     blocks_parsed: int
     message: str
+    document_type: Optional[str] = None     # e.g., "legal_contract", "technical_documentation"
+    domain: Optional[str] = None            # e.g., "legal", "technical", "medical"
+    doc_register: Optional[str] = None      # e.g., "formal", "informal"
 
 
 # ---------------------------------------------------------------------------

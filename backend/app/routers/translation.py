@@ -52,7 +52,13 @@ async def translate_document(request: TranslateRequest):
     all_segments: List[dict] = data.get("segments", [])
     target_ids = set(request.segment_ids) if request.segment_ids else None
     effective_rules = request.style_rules or get_style_rules()
-    glossary_fragment = build_glossary_prompt_fragment("", request.target_language)
+
+    # ── Load document classification context ──────────────────────────────
+    classification = data.get("metadata", {}).get("classification", {})
+    document_domain = classification.get("domain")
+    glossary_fragment = build_glossary_prompt_fragment(
+        "", request.target_language, document_domain=document_domain
+    )
 
     # ── 0. Pre-validation (AI-powered, opt-in) ────────────────────────────
     validation_results = []
@@ -62,6 +68,7 @@ async def translate_document(request: TranslateRequest):
             segments=all_segments,
             auto_fix=False,
             enable_ai=True,
+            document_context=classification,
         )
         data["validation_results"] = validation_results
         logger.info(f"Pre-validation complete: {len(validation_results)} segments with issues")
@@ -153,7 +160,10 @@ async def translate_document(request: TranslateRequest):
             seg_index[seg["id"]]["translated_text"] = raw
             continue
 
-        corrected, violations = enforce_glossary(raw, seg["text"], request.target_language)
+        corrected, violations = enforce_glossary(
+            raw, seg["text"], request.target_language,
+            document_domain=document_domain,
+        )
         if violations:
             logger.info(f"Glossary: {len(violations)} fix(es) on {seg['id']}")
 

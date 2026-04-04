@@ -261,12 +261,13 @@ Severity guide:
 - "info": Style suggestion that improves readability but is not wrong (e.g., passive voice, wordiness)
 
 Rules:
-1. Do NOT flag proper nouns, brand names, or technical terms as misspellings.
+1. Do NOT flag proper nouns, brand names, or technical/domain-specific terms as misspellings.
 2. Do NOT flag stylistic preferences unless they genuinely harm clarity.
 3. Focus on issues that would cause problems in machine translation.
 4. Be precise with the "span" field — copy the exact problematic text.
 5. If the text is clean, return an empty array: []
-6. Keep confidence high (>0.8) for clear errors, lower for style suggestions."""
+6. Keep confidence high (>0.8) for clear errors, lower for style suggestions.
+7. Pay special attention to spelling errors, wrong-word usage, and grammatical mistakes — the static spellchecker has been removed in favor of your contextual analysis."""
 
 _CROSS_SEGMENT_ADDITION = """
 Additionally, here is a summary of terminology used across the entire document. Flag any inconsistencies you notice in the text being analyzed (e.g., the text uses "customer" but the rest of the document predominantly uses "client"):
@@ -283,9 +284,32 @@ _BATCH_VALIDATION_USER_PROMPT = """Analyze each of the following text segments f
 Return ONLY the JSON object. No markdown fences, no explanation."""
 
 
-def _build_ai_validation_prompt(text: str, term_summary: Optional[str] = None) -> Tuple[str, str]:
+_DOCUMENT_CONTEXT_ADDITION = """
+Document Context:
+- Document type: {document_type}
+- Domain: {domain}
+- Register/tone: {register}
+- Domain-specific keywords (do NOT flag these as spelling errors): {domain_keywords}
+
+Use this context to calibrate your analysis. For example, legal documents should use formal register and legal terminology is expected; technical docs will contain jargon that is correct.
+"""
+
+def _build_ai_validation_prompt(
+    text: str,
+    term_summary: Optional[str] = None,
+    document_context: Optional[Dict] = None,
+) -> Tuple[str, str]:
     """Build the system and user prompts for AI validation."""
     system = _VALIDATION_SYSTEM_PROMPT
+    
+    if document_context:
+        system += _DOCUMENT_CONTEXT_ADDITION.format(
+            document_type=document_context.get("document_type", "general"),
+            domain=document_context.get("domain", "general"),
+            register=document_context.get("register", "formal"),
+            domain_keywords=", ".join(document_context.get("domain_keywords", [])) or "none",
+        )
+    
     if term_summary:
         system += _CROSS_SEGMENT_ADDITION.format(term_summary=term_summary)
     
@@ -334,6 +358,7 @@ def _parse_ai_response(raw: str) -> List[Dict]:
 def _ai_validate(
     text: str,
     term_summary: Optional[str] = None,
+    document_context: Optional[Dict] = None,
 ) -> List[Dict]:
     """
     Layer 2: Use the LLM to perform context-aware validation on a single text.
@@ -348,7 +373,7 @@ def _ai_validate(
         logger.warning("LLM service not available — AI validation skipped.")
         return []
     
-    system, user = _build_ai_validation_prompt(text, term_summary)
+    system, user = _build_ai_validation_prompt(text, term_summary, document_context)
     
     try:
         raw_response = _call_llm(system, user, max_tokens=2048)
@@ -409,6 +434,7 @@ def _ai_validate_batch(
     segments: List[Dict],
     term_summary: Optional[str] = None,
     batch_size: int = 5,
+    document_context: Optional[Dict] = None,
 ) -> Dict[str, List[Dict]]:
     """
     Batch AI validation: packs multiple segments into a single LLM call.
@@ -443,6 +469,13 @@ def _ai_validate_batch(
             segments_block += f'Segment "{sid}":\n"""\n{txt}\n"""\n\n'
         
         system = _VALIDATION_SYSTEM_PROMPT
+        if document_context:
+            system += _DOCUMENT_CONTEXT_ADDITION.format(
+                document_type=document_context.get("document_type", "general"),
+                domain=document_context.get("domain", "general"),
+                register=document_context.get("register", "formal"),
+                domain_keywords=", ".join(document_context.get("domain_keywords", [])) or "none",
+            )
         if term_summary:
             system += _CROSS_SEGMENT_ADDITION.format(term_summary=term_summary)
         
@@ -690,6 +723,8 @@ def validate_text(
     min_issue_severity: str = "warning",   # "info" | "warning" | "error"
     enable_ai: bool = False,
     term_summary: Optional[str] = None,
+    document_context: Optional[Dict] = None,
+    legacy_spellcheck: bool = False,
 ) -> Dict:
     """
     Validate source text with hybrid deterministic + AI analysis.
@@ -700,21 +735,28 @@ def validate_text(
         auto_fix: If True, apply deterministic auto-fixes.
         min_issue_severity: Filter threshold ("info", "warning", "error").
         enable_ai: If True, also run LLM-powered context-aware validation.
-        term_summary: Optional cross-document term frequency summary for
-                      consistency checking.
+        term_summary: Optional cross-document term frequency summary.
+        document_context: Optional dict with document_type, domain, register,
+                          domain_keywords from the classifier.
+        legacy_spellcheck: If True, run PySpellChecker (disabled by default).
     """
-    # ── Layer 1: Deterministic checks ────────────────────────────────────
+    # ── Layer 1: Deterministic checks ────────────────────────────────
     deterministic_issues: List[Dict] = []
     deterministic_issues.extend(_grammar_check(text))
-    deterministic_issues.extend(_spell_check(text))
+    if legacy_spellcheck:
+        deterministic_issues.extend(_spell_check(text))
     deterministic_issues.extend(_consistency_check(text))
 
-    # ── Layer 2: AI Agent (opt-in) ───────────────────────────────────────
+    # ── Layer 2: AI Agent (opt-in) ───────────────────────────────────
     ai_issues: List[Dict] = []
     if enable_ai:
-        ai_issues = _ai_validate(text, term_summary=term_summary)
+        ai_issues = _ai_validate(
+            text,
+            term_summary=term_summary,
+            document_context=document_context,
+        )
 
-    # ── Merge & deduplicate ──────────────────────────────────────────────
+    # ── Merge & deduplicate ──────────────────────────────────────────
     all_issues = _merge_issues(deterministic_issues, ai_issues)
 
     # Severity filter — drop anything below the requested threshold
@@ -743,6 +785,8 @@ def validate_segments(
     auto_fix: bool = False,
     only_with_issues: bool = True,        # skip clean segments — less clutter
     enable_ai: bool = False,
+    document_context: Optional[Dict] = None,
+    legacy_spellcheck: bool = False,
 ) -> List[Dict]:
     """
     Validate a list of segment dicts.
@@ -752,8 +796,9 @@ def validate_segments(
     2. Sends segments in batched LLM calls for AI validation.
     3. Merges AI issues with deterministic issues per-segment.
     
-    With only_with_issues=True (default), returns only segments that have
-    at least one issue, keeping the response lean.
+    Args:
+        document_context: Dict with document_type, domain, register, domain_keywords.
+        legacy_spellcheck: If True, run PySpellChecker (disabled by default).
     """
     # ── Cross-segment term summary (for AI consistency checks) ───────────
     term_summary = None
@@ -761,9 +806,13 @@ def validate_segments(
     
     if enable_ai:
         term_summary = _build_term_summary(segments)
-        ai_results = _ai_validate_batch(segments, term_summary=term_summary)
+        ai_results = _ai_validate_batch(
+            segments,
+            term_summary=term_summary,
+            document_context=document_context,
+        )
     
-    # ── Per-segment validation ───────────────────────────────────────────
+    # ── Per-segment validation ───────────────────────────────────────
     results = []
     for seg in segments:
         seg_id = seg.get("id")
@@ -772,10 +821,11 @@ def validate_segments(
         if not text.strip() or seg.get("status") == "skip":
             continue
         
-        # Layer 1: deterministic
+        # Layer 1: deterministic (spellcheck disabled by default)
         deterministic_issues: List[Dict] = []
         deterministic_issues.extend(_grammar_check(text))
-        deterministic_issues.extend(_spell_check(text))
+        if legacy_spellcheck:
+            deterministic_issues.extend(_spell_check(text))
         deterministic_issues.extend(_consistency_check(text))
         
         # Layer 2: AI (already computed in batch)
