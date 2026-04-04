@@ -25,6 +25,7 @@ from app.services.glossary_engine import (
     get_style_rules,
     enforce_glossary,
 )
+from app.services.validator import validate_segments
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/translate", tags=["translation"])
@@ -52,6 +53,18 @@ async def translate_document(request: TranslateRequest):
     target_ids = set(request.segment_ids) if request.segment_ids else None
     effective_rules = request.style_rules or get_style_rules()
     glossary_fragment = build_glossary_prompt_fragment("", request.target_language)
+
+    # ── 0. Pre-validation (AI-powered, opt-in) ────────────────────────────
+    validation_results = []
+    if request.pre_validate:
+        logger.info(f"Running pre-translation AI validation for doc: {request.document_id}")
+        validation_results = validate_segments(
+            segments=all_segments,
+            auto_fix=False,
+            enable_ai=True,
+        )
+        data["validation_results"] = validation_results
+        logger.info(f"Pre-validation complete: {len(validation_results)} segments with issues")
 
     # ── 1. Filter segments that need translation ──────────────────────────────
     # Load the language this document was previously translated to (if any)

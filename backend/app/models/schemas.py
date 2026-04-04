@@ -102,13 +102,16 @@ class ValidationIssue(BaseModel):
     issue_type: Literal[
         "spelling", "double_space", "punctuation_spacing",
         "consistency", "grammar", "style",
-        "space_before_punct", "missing_space_after_punct", "repeated_punctuation"
+        "space_before_punct", "missing_space_after_punct", "repeated_punctuation",
+        "clarity", "wrong_word", "punctuation"
     ]
     issue: str
     suggestion: str
     severity: Literal["error", "warning", "info"]
     offset: Optional[int] = None      # character offset in text
     length: Optional[int] = None      # length of problematic span
+    confidence: Optional[float] = None  # 0.0–1.0, set by AI agent
+    source: Optional[str] = None        # "deterministic" | "ai" | "merged"
 
 
 class ValidationResult(BaseModel):
@@ -127,6 +130,7 @@ class ValidateRequest(BaseModel):
     document_id: Optional[str] = None
     text: Optional[str] = None          # validate arbitrary text if no doc_id
     auto_fix: bool = False
+    enable_ai: bool = False             # enable LLM-powered context-aware validation
 
 
 # ---------------------------------------------------------------------------
@@ -139,6 +143,7 @@ class TranslateRequest(BaseModel):
     target_language: str = "fr"
     style_rules: List[str] = Field(default_factory=list)
     segment_ids: Optional[List[str]] = None   # translate only these segments
+    pre_validate: bool = False                # run AI validation before translation
 
 
 class TranslateResponse(BaseModel):
