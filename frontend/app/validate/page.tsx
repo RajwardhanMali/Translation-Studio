@@ -10,6 +10,7 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
 import { Spinner } from '@/components/ui/spinner'
+import { Textarea } from '@/components/ui/textarea'
 import { useToast } from '@/hooks/use-toast'
 import { approveSegment, validateDocument, type ValidationIssue, type ValidationResult } from '@/lib/api'
 import { cn } from '@/lib/utils'
@@ -39,13 +40,18 @@ function ValidationCard({
 }: {
   result: ValidationResult
   showInfo: boolean
-  onApplyFix: () => Promise<void>
+  onApplyFix: (nextText: string) => Promise<void>
   applying: boolean
 }) {
   const [expanded, setExpanded] = useState(true)
+  const [draftCorrection, setDraftCorrection] = useState(result.auto_fixed_text ?? '')
   const visibleIssues = showInfo ? result.issues : result.issues.filter((issue) => issue.severity === 'warning')
   const hiddenInfoCount = result.issues.length - visibleIssues.length
   const hasWarning = visibleIssues.some((issue) => issue.severity === 'warning')
+
+  useEffect(() => {
+    setDraftCorrection(result.auto_fixed_text ?? '')
+  }, [result.auto_fixed_text])
 
   return (
     <HoverCard layout className="overflow-hidden rounded-2xl border border-border/70 bg-card">
@@ -99,15 +105,21 @@ function ValidationCard({
           ))}
 
           {result.auto_fixed_text && result.segment_id && (
-            <div className="flex flex-wrap items-center gap-3 rounded-2xl border border-border/60 bg-background/70 p-3">
-              <div className="min-w-0 flex-1">
+            <div className="rounded-2xl border border-border/60 bg-background/70 p-3">
+              <div className="min-w-0">
                 <p className="text-xs font-medium text-foreground">Suggested correction</p>
-                <p className="mt-1 text-sm text-muted-foreground">{result.auto_fixed_text}</p>
+                <Textarea
+                  value={draftCorrection}
+                  onChange={(event) => setDraftCorrection(event.target.value)}
+                  className="mt-3 min-h-24 rounded-2xl border-border/70 bg-background/90 text-sm leading-7"
+                />
               </div>
-              <Button size="sm" variant="outline" className="rounded-xl" onClick={() => void onApplyFix()} disabled={applying}>
-                {applying ? <Spinner className="mr-1.5 h-3.5 w-3.5" /> : <Wand2 className="mr-1.5 h-3.5 w-3.5" />}
-                Apply
-              </Button>
+              <div className="mt-3 flex justify-end">
+                <Button size="sm" variant="outline" className="rounded-xl" onClick={() => void onApplyFix(draftCorrection)} disabled={applying || !draftCorrection.trim()}>
+                  {applying ? <Spinner className="mr-1.5 h-3.5 w-3.5" /> : <Wand2 className="mr-1.5 h-3.5 w-3.5" />}
+                  Apply
+                </Button>
+              </div>
             </div>
           )}
         </div>
@@ -178,17 +190,18 @@ function ValidationPageContent() {
     return results.filter((result) => result.issues.some((issue) => issue.severity === 'warning'))
   }, [results, showInfo])
 
-  const handleApplyFix = async (result: ValidationResult) => {
-    if (!result.segment_id || !result.auto_fixed_text) return
+  const handleApplyFix = async (result: ValidationResult, nextText: string) => {
+    const trimmedText = nextText.trim()
+    if (!result.segment_id || !trimmedText) return
 
     setApplyingId(result.segment_id)
     try {
-      await approveSegment(result.segment_id, false, result.auto_fixed_text)
+      await approveSegment(result.segment_id, false, trimmedText)
       setResults((prev) =>
         prev
           .map((item) =>
             item.segment_id === result.segment_id
-              ? { ...item, text: result.auto_fixed_text ?? item.text, issues: [], has_errors: false, has_warnings: false }
+              ? { ...item, text: trimmedText, auto_fixed_text: trimmedText, issues: [], has_errors: false, has_warnings: false }
               : item
           )
           .filter((item) => item.issues.length > 0)
@@ -293,7 +306,7 @@ function ValidationPageContent() {
                     <ValidationCard
                       result={result}
                       showInfo={showInfo}
-                      onApplyFix={() => handleApplyFix(result)}
+                      onApplyFix={(nextText) => handleApplyFix(result, nextText)}
                       applying={applyingId === result.segment_id}
                     />
                   </motion.div>

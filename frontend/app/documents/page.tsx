@@ -208,6 +208,7 @@ export default function DocumentsPage() {
   const [deletingId, setDeletingId] = useState<string | null>(null)
   const [shareOverview, setShareOverview] = useState<ShareOverviewResponse>({
     ownedByDocument: {},
+    visibleByDocument: {},
     receivedDocumentIds: [],
   })
 
@@ -220,6 +221,7 @@ export default function DocumentsPage() {
         getDocuments(),
         getShareOverview().catch(() => ({
           ownedByDocument: {},
+          visibleByDocument: {},
           receivedDocumentIds: [],
         })),
       ])
@@ -232,7 +234,11 @@ export default function DocumentsPage() {
         variant: 'destructive',
       })
       setDocuments([])
-      setShareOverview({ ownedByDocument: {}, receivedDocumentIds: [] })
+      setShareOverview({
+        ownedByDocument: {},
+        visibleByDocument: {},
+        receivedDocumentIds: [],
+      })
     } finally {
       setLoading(false)
       setRefreshing(false)

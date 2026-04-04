@@ -124,6 +124,10 @@ export interface ShareRecipient {
   accessedAt: string
 }
 
+export interface ShareParticipant extends ShareRecipient {
+  role: 'owner' | 'recipient'
+}
+
 export interface ShareOverviewResponse {
   ownedByDocument: Record<
     string,
@@ -131,6 +135,14 @@ export interface ShareOverviewResponse {
       shareId: string
       shareUrl: string
       recipients: ShareRecipient[]
+    }
+  >
+  visibleByDocument: Record<
+    string,
+    {
+      shareId: string
+      shareUrl: string
+      participants: ShareParticipant[]
     }
   >
   receivedDocumentIds: string[]

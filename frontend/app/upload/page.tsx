@@ -2,7 +2,7 @@
 
 import { useState, useCallback, useRef } from 'react'
 import { useRouter } from 'next/navigation'
-import { Upload, FileText, File, CheckCircle2, AlertCircle, X, ArrowRight, Sparkles, ShieldCheck, TimerReset } from 'lucide-react'
+import { Upload, FileText, File, CheckCircle2, AlertCircle, X, ArrowRight, ShieldCheck } from 'lucide-react'
 import { AppShell } from '@/components/app-shell'
 import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
@@ -138,56 +138,56 @@ export default function UploadPage() {
       subtitle="Bring in a PDF or DOCX and move straight into validation, translation, and reviewer approval."
     >
       <div className="space-y-6">
-        <section className="hero-sheen overflow-hidden rounded-[2rem] border border-border/70">
-          <div className="grid gap-8 px-6 py-8 lg:grid-cols-[1.15fr_0.85fr] lg:px-8">
-            <div className="space-y-5">
-              <Badge className="rounded-full border border-white/30 bg-white/15 px-3 py-1 text-[11px] font-semibold tracking-[0.2em] text-foreground backdrop-blur">
-                Launch Faster
+        <section className="hero-sheen overflow-hidden rounded-[1.75rem] border border-border/70">
+          <div className="grid gap-6 px-6 py-6 lg:grid-cols-[minmax(0,1fr)_300px] lg:items-end lg:px-8">
+            <div className="space-y-4">
+              <Badge className="w-fit rounded-full border border-white/25 bg-white/10 px-3 py-1 text-[11px] font-semibold tracking-[0.2em] text-foreground backdrop-blur">
+                Ready to ingest
               </Badge>
               <div className="space-y-3">
-                <h2 className="max-w-2xl text-3xl font-semibold tracking-tight text-foreground md:text-5xl">
-                  Turn dense source files into a clean translation workflow in minutes.
+                <h2 className="max-w-2xl text-3xl font-semibold tracking-tight text-foreground md:text-4xl">
+                  Start with one clean upload.
                 </h2>
                 <p className="max-w-2xl text-sm leading-7 text-muted-foreground md:text-base">
-                  Upload once, preserve document structure, validate the source, and move into a calmer review
-                  workspace built for fast approvals.
+                  Drop in a PDF or DOCX, preserve structure, and move straight into validation and translation without extra setup.
                 </p>
               </div>
 
-              <div className="grid gap-3 sm:grid-cols-3">
-                {[
-                  { icon: ShieldCheck, label: 'Reliable structure', note: 'PDF and DOCX parsing with block awareness' },
-                  { icon: Sparkles, label: 'Cleaner review', note: 'Validation and translation in one guided flow' },
-                  { icon: TimerReset, label: 'Fast onboarding', note: 'From upload to export without tool switching' },
-                ].map((item) => (
-                  <div key={item.label} className="rounded-[1.5rem] border border-white/30 bg-white/10 p-4 backdrop-blur">
-                    <item.icon className="h-4 w-4 text-foreground" />
-                    <p className="mt-4 text-sm font-semibold text-foreground">{item.label}</p>
-                    <p className="mt-1 text-xs leading-6 text-muted-foreground">{item.note}</p>
-                  </div>
+              <div className="flex flex-wrap gap-2">
+                {['PDF and DOCX support', 'Structure-aware parsing', 'Up to 50 MB per file'].map((item) => (
+                  <Badge
+                    key={item}
+                    variant="outline"
+                    className="rounded-full border-border/70 bg-background/55 px-3 py-1 text-xs text-muted-foreground backdrop-blur"
+                  >
+                    {item}
+                  </Badge>
                 ))}
               </div>
             </div>
 
-            <div className="grid gap-4 sm:grid-cols-3 lg:grid-cols-1">
-              {[
-                { label: 'Accepted formats', value: 'PDF, DOCX' },
-                { label: 'File limit', value: '50 MB' },
-                { label: 'Typical parse time', value: '~3s / page' },
-              ].map((s) => (
-                <Card key={s.label} className="rounded-[1.5rem] border-white/25 bg-white/10 p-5 backdrop-blur">
-                  <p className="text-xs uppercase tracking-[0.18em] text-muted-foreground">{s.label}</p>
-                  <p className="mt-3 text-lg font-semibold text-foreground">{s.value}</p>
-                </Card>
-              ))}
-            </div>
+            <Card className="rounded-[1.5rem] border-white/20 bg-white/10 p-5 backdrop-blur">
+              <div className="flex items-start gap-3">
+                <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl bg-primary/12 text-primary">
+                  <ShieldCheck className="h-4 w-4" />
+                </div>
+                <div>
+                  <p className="text-xs font-semibold uppercase tracking-[0.18em] text-muted-foreground">
+                    Before you upload
+                  </p>
+                  <p className="mt-2 text-sm leading-7 text-foreground">
+                    Best results come from text-based PDFs and clean DOCX files with stable headings and tables.
+                  </p>
+                </div>
+              </div>
+            </Card>
           </div>
         </section>
 
         <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_320px]">
           <Card
             className={cn(
-              'relative flex min-h-[28rem] flex-col items-center justify-center rounded-[2rem] border-2 border-dashed p-8 text-center transition-all duration-200',
+              'relative flex min-h-[24rem] flex-col items-center justify-center rounded-[1.75rem] border-2 border-dashed p-6 text-center transition-all duration-200 sm:p-8',
               uploadState === 'dragging'
                 ? 'border-primary bg-primary/8 scale-[1.01]'
                 : uploadState === 'success'
@@ -234,7 +234,7 @@ export default function UploadPage() {
                 <p className="mt-2 text-sm text-muted-foreground">
                   or <span className="font-medium text-primary">browse from your device</span>
                 </p>
-                <div className="mt-5 flex gap-2">
+                <div className="mt-5 flex flex-wrap justify-center gap-2">
                   {['PDF', 'DOCX'].map((f) => (
                     <Badge key={f} variant="secondary" className="rounded-full font-mono text-xs">
                       .{f.toLowerCase()}
@@ -288,41 +288,46 @@ export default function UploadPage() {
           </Card>
 
           <div className="space-y-4">
-            <Card className="glass-panel rounded-[1.75rem] p-5">
-              <p className="text-xs font-semibold uppercase tracking-[0.2em] text-muted-foreground">Workflow</p>
-              <div className="mt-4 space-y-4">
+            <Card className="glass-panel rounded-[1.5rem] p-5">
+              <div className="flex items-center justify-between gap-3">
+                <p className="text-xs font-semibold uppercase tracking-[0.2em] text-muted-foreground">Workflow</p>
+                <Badge variant="outline" className="rounded-full text-[10px] font-semibold uppercase tracking-[0.16em]">
+                  4 steps
+                </Badge>
+              </div>
+              <div className="mt-4 space-y-3">
                 {[
-                  'Upload your PDF or DOCX source file',
-                  'Validate spelling, grammar, and consistency',
-                  'Generate translations into the target language',
-                  'Review and approve segments with TM support',
+                  'Upload the source file',
+                  'Validate the extracted text',
+                  'Generate the target-language draft',
+                  'Review and approve final segments',
                 ].map((step, i) => (
                   <div key={step} className="flex items-start gap-3">
                     <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-primary/12 text-xs font-bold text-primary">
                       {i + 1}
                     </div>
-                    <p className="text-sm leading-7 text-muted-foreground">{step}</p>
+                    <p className="text-sm leading-6 text-muted-foreground">{step}</p>
                   </div>
                 ))}
               </div>
             </Card>
 
-            <Card className="glass-panel rounded-[1.75rem] p-5">
+            <Card className="glass-panel rounded-[1.5rem] p-5">
               <p className="text-xs font-semibold uppercase tracking-[0.2em] text-muted-foreground">Actions</p>
               <div className="mt-4 flex flex-col gap-3">
                 {selectedFile && uploadState !== 'uploading' && uploadState !== 'success' && (
-                  <Button onClick={handleUpload} className="h-11 rounded-2xl">
+                  <Button onClick={handleUpload} className="h-11 rounded-xl">
                     <Upload className="mr-2 h-4 w-4" />
-                    Upload And Parse
+                    Upload and parse
                   </Button>
                 )}
 
                 {uploadState === 'success' && (
                   <>
-                    <Button variant="outline" onClick={reset} className="h-11 rounded-2xl">
+                    <Button variant="outline" onClick={reset} className="h-11 rounded-xl">
                       Upload Another
                     </Button>
-                    <Button onClick={handleProceed} className="h-11 rounded-2xl">
+                    <Button onClick={handleProceed} className="h-11 rounded-xl">
                       Validate Document
                       <ArrowRight className="ml-2 h-4 w-4" />
                     </Button>
@@ -332,7 +337,7 @@ export default function UploadPage() {
                 {!selectedFile && (
                   <Button
                     variant="outline"
-                    className="h-11 rounded-2xl"
+                    className="h-11 rounded-xl"
                     onClick={() => inputRef.current?.click()}
                   >
                     <File className="mr-2 h-4 w-4" />

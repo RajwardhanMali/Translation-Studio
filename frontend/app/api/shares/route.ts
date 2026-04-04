@@ -1,9 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { auth } from '@clerk/nextjs/server'
-import { and, desc, eq } from 'drizzle-orm'
+import { and, desc, eq, inArray } from 'drizzle-orm'
 import { getDb } from '@/lib/db-index'
 import { ensureAppTables } from '@/lib/db-ensure'
-import { documentShares } from '@/lib/db/schema'
+import { appUsers, documentShares } from '@/lib/db/schema'
 import { documentShareAccess } from '@/lib/share-access-schema'
 
 export async function POST(request: NextRequest) {
@@ -80,6 +80,47 @@ export async function GET() {
     orderBy: desc(documentShareAccess.updatedAt),
   })
 
+  const allVisibleShares = [
+    ...ownedShares,
+    ...ownedShares
+      .flatMap((share) =>
+        receivedShares
+          .filter((access) => access.shareId === share.shareId)
+          .map(() => share),
+      ),
+  ]
+
+  const receivedShareIds = Array.from(new Set(receivedShares.map((share) => share.shareId)))
+  const missingReceivedShares = receivedShareIds.filter(
+    (shareId) => !ownedShares.some((share) => share.shareId === shareId),
+  )
+
+  if (missingReceivedShares.length > 0) {
+    const additionalShares = await db.query.documentShares.findMany({
+      where: inArray(documentShares.shareId, missingReceivedShares),
+    })
+    allVisibleShares.push(...additionalShares)
+  }
+
+  const uniqueVisibleShares = Array.from(
+    new Map(allVisibleShares.map((share) => [share.shareId, share])).values(),
+  )
+
+  const visibleOwnerIds = Array.from(
+    new Set(uniqueVisibleShares.map((share) => share.ownerClerkUserId)),
+  )
+
+  const ownerProfiles =
+    visibleOwnerIds.length > 0
+      ? await db.query.appUsers.findMany({
+          where: inArray(appUsers.clerkUserId, visibleOwnerIds),
+        })
+      : []
+
+  const ownerProfileMap = new Map(
+    ownerProfiles.map((profile) => [profile.clerkUserId, profile]),
+  )
+
   const ownedByDocument = ownedShares.reduce<Record<string, { shareId: string; shareUrl: string; recipients: Array<{ clerkUserId: string; email: string; name: string | null; accessedAt: string }> }>>(
     (acc, share) => {
       acc[share.documentId] = {
@@ -104,8 +145,66 @@ export async function GET() {
     new Set(receivedShares.map((share) => share.documentId)),
   )
 
+  const visibleByDocument = uniqueVisibleShares.reduce<
+    Record<
+      string,
+      {
+        shareId: string
+        shareUrl: string
+        participants: Array<{
+          clerkUserId: string
+          email: string
+          name: string | null
+          accessedAt: string
+          role: 'owner' | 'recipient'
+        }>
+      }
+    >
+  >((acc, share) => {
+    const ownerProfile = ownerProfileMap.get(share.ownerClerkUserId)
+    const recipientParticipants = ownedShareAccess
+      .concat(receivedShares)
+      .filter((access) => access.shareId === share.shareId)
+      .map((access) => ({
+        clerkUserId: access.recipientClerkUserId,
+        email: access.recipientEmail,
+        name: access.recipientName,
+        accessedAt: access.updatedAt.toISOString(),
+        role: 'recipient' as const,
+      }))
+
+    const ownerParticipant = {
+      clerkUserId: share.ownerClerkUserId,
+      email: ownerProfile?.email ?? '',
+      name:
+        share.ownerClerkUserId === userId
+          ? ownerProfile?.name ?? 'You'
+          : ownerProfile?.name ?? 'Owner',
+      accessedAt: share.updatedAt.toISOString(),
+      role: 'owner' as const,
+    }
+
+    const participants = Array.from(
+      new Map(
+        [ownerParticipant, ...recipientParticipants].map((participant) => [
+          participant.clerkUserId,
+          participant,
+        ]),
+      ).values(),
+    )
+
+    acc[share.documentId] = {
+      shareId: share.shareId,
+      shareUrl: `/share/${share.shareId}`,
+      participants,
+    }
+
+    return acc
+  }, {})
+
   return NextResponse.json({
     ownedByDocument,
+    visibleByDocument,
     receivedDocumentIds,
   })
 }

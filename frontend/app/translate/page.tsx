@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, Suspense } from "react";
+import { memo, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import { useSearchParams, useRouter } from "next/navigation";
 import {
@@ -10,11 +10,14 @@ import {
   CheckCircle2,
   ChevronRight,
   Copy,
+  LayoutGrid,
   Languages,
   Lightbulb,
+  List,
   RefreshCw,
   RotateCcw,
   Sparkles,
+  Table2,
   Users,
   WandSparkles,
   X,
@@ -30,6 +33,7 @@ import {
   HoverCardContent,
   HoverCardTrigger,
 } from "@/components/ui/hover-card";
+import { Input } from "@/components/ui/input";
 import {
   Select,
   SelectContent,
@@ -38,6 +42,14 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Spinner } from "@/components/ui/spinner";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
 import { Textarea } from "@/components/ui/textarea";
 import { useToast } from "@/hooks/use-toast";
 import {
@@ -70,6 +82,9 @@ const LANGUAGES = [
 const STATUS_FILTERS = ["all", "pending", "reviewed", "approved"] as const;
 type StatusFilter = (typeof STATUS_FILTERS)[number];
 const VISIBLE_TYPES = new Set(["sentence", "heading", "table_cell"]);
+const VIEW_MODES = ["cards", "compact", "table"] as const;
+type ViewMode = (typeof VIEW_MODES)[number];
+const TABLE_PAGE_SIZE_OPTIONS = [6, 10, 15, 20] as const;
 type WorkspaceSegment = Segment & {
   sourceEdited?: boolean;
 };
@@ -190,6 +205,16 @@ function isTranslationError(text: string | undefined) {
   );
 }
 
+function getSegmentOutputText(segment: Pick<Segment, "final_text" | "translated_text">) {
+  return segment.final_text || segment.translated_text || "";
+}
+
+function hasTranslatedOutput(
+  segment: Pick<Segment, "final_text" | "translated_text">,
+) {
+  return Boolean(getSegmentOutputText(segment).trim());
+}
+
 function isVisibleSegment(segment: Segment) {
   return segment.status !== "skip" && VISIBLE_TYPES.has(segment.type);
 }
@@ -203,17 +228,17 @@ function StatusPill({
     pending: {
       label: "Pending",
       className:
-        "border-slate-300/70 bg-slate-100/90 text-slate-700 dark:border-slate-700 dark:bg-slate-900/70 dark:text-slate-200",
+        "border-slate-400/80 bg-slate-100/95 text-slate-700 dark:border-slate-600/90 dark:bg-slate-900/80 dark:text-slate-200",
     },
     reviewed: {
       label: "Reviewed",
       className:
-        "border-amber-300/70 bg-amber-100/90 text-amber-800 dark:border-amber-800/70 dark:bg-amber-950/60 dark:text-amber-200",
+        "border-amber-400/80 bg-amber-100/95 text-amber-800 dark:border-amber-700/90 dark:bg-amber-950/65 dark:text-amber-200",
     },
     approved: {
       label: "Approved",
       className:
-        "border-emerald-300/70 bg-emerald-100/90 text-emerald-800 dark:border-emerald-800/70 dark:bg-emerald-950/60 dark:text-emerald-200",
+        "border-emerald-400/80 bg-emerald-100/95 text-emerald-800 dark:border-emerald-700/90 dark:bg-emerald-950/65 dark:text-emerald-200",
     },
   } as const;
 
@@ -277,350 +302,383 @@ interface SegmentRowProps {
   retrying: boolean;
 }
 
-function SegmentRow({
-  segment,
-  selected,
-  onSelect,
-  onApprove,
-  onUpdateOutput,
-  onUpdateSource,
-  onRetry,
-  retrying,
-}: SegmentRowProps) {
-  const [editingMode, setEditingMode] = useState<"none" | "source" | "output">(
-    "none",
-  );
-  const [sourceValue, setSourceValue] = useState(segment.source_text);
-  const [outputValue, setOutputValue] = useState(
-    segment.final_text || segment.translated_text,
-  );
-  const [approving, setApproving] = useState(false);
-  const [showTM, setShowTM] = useState(false);
+const INITIAL_SEGMENT_BATCH = 24;
+const SEGMENT_BATCH_SIZE = 16;
 
-  useEffect(() => {
-    setSourceValue(segment.source_text);
-    setOutputValue(segment.final_text || segment.translated_text);
-  }, [segment.source_text, segment.final_text, segment.translated_text]);
+const SegmentRow = memo(
+  function SegmentRow({
+    segment,
+    selected,
+    onSelect,
+    onApprove,
+    onUpdateOutput,
+    onUpdateSource,
+    onRetry,
+    retrying,
+  }: SegmentRowProps) {
+    const [editingMode, setEditingMode] = useState<
+      "none" | "source" | "output"
+    >("none");
+    const [sourceValue, setSourceValue] = useState(segment.source_text);
+    const [outputValue, setOutputValue] = useState(
+      segment.final_text || segment.translated_text,
+    );
+    const [approving, setApproving] = useState(false);
+    const [showTM, setShowTM] = useState(false);
 
-  const statusAccentMap: Record<string, string> = {
-    pending: "before:bg-slate-400",
-    reviewed: "before:bg-amber-400",
-    approved: "before:bg-emerald-400",
-  };
+    useEffect(() => {
+      setSourceValue(segment.source_text);
+      setOutputValue(getSegmentOutputText(segment));
+    }, [segment.source_text, segment.final_text, segment.translated_text]);
 
-  const handleApprove = async () => {
-    setApproving(true);
-    await onApprove(segment, outputValue);
-    setEditingMode("none");
-    setApproving(false);
-  };
+    const canApprove = hasTranslatedOutput(segment);
+    const isApproved = segment.status === "approved";
 
-  const handleEditSource = () => {
-    setSourceValue(segment.source_text);
-    setEditingMode("source");
-  };
+    const statusAccentMap: Record<string, string> = {
+      pending: "before:bg-slate-400",
+      reviewed: "before:bg-amber-400",
+      approved: "before:bg-emerald-400",
+    };
 
-  const handleEditOutput = () => {
-    setOutputValue(segment.final_text || segment.translated_text);
-    setEditingMode("output");
-  };
+    const handleApprove = async () => {
+      if (!canApprove) return;
+      setApproving(true);
+      await onApprove(segment, outputValue);
+      setEditingMode("none");
+      setApproving(false);
+    };
 
-  const handleCancel = () => {
-    setSourceValue(segment.source_text);
-    setOutputValue(segment.final_text || segment.translated_text);
-    setEditingMode("none");
-  };
+    const handleEditSource = () => {
+      if (isApproved) return;
+      setSourceValue(segment.source_text);
+      setEditingMode("source");
+    };
 
-  const handleSave = () => {
-    if (editingMode === "source") {
-      onUpdateSource(segment.segment_id, sourceValue);
-    }
+    const handleEditOutput = () => {
+      if (isApproved) return;
+      setOutputValue(getSegmentOutputText(segment));
+      setEditingMode("output");
+    };
 
-    if (editingMode === "output") {
-      onUpdateOutput(segment.segment_id, outputValue);
-    }
+    const handleCancel = () => {
+      setSourceValue(segment.source_text);
+      setOutputValue(getSegmentOutputText(segment));
+      setEditingMode("none");
+    };
 
-    setEditingMode("none");
-  };
+    const handleSave = () => {
+      if (editingMode === "source") {
+        onUpdateSource(segment.segment_id, sourceValue);
+      }
 
-  const isHeading = segment.type === "heading";
-  const isTableCell = segment.type === "table_cell";
-  const sourceTextClass = isHeading
-    ? "text-lg font-semibold leading-8"
-    : "text-sm leading-7";
-  const outputTextClass = isHeading
-    ? "text-base font-semibold leading-8"
-    : "text-sm leading-7";
+      if (editingMode === "output") {
+        onUpdateOutput(segment.segment_id, outputValue);
+      }
 
-  return (
-    <motion.div
-      layout
-      initial={{ opacity: 0, y: 18 }}
-      animate={{ opacity: 1, y: 0 }}
-      transition={{ duration: 0.35, ease: [0.22, 1, 0.36, 1] }}
-      whileHover={{ y: -3 }}
-      className={cn(
-        "relative overflow-hidden rounded-[1.6rem] border border-border/70 bg-card/90 shadow-[0_18px_50px_-34px_rgba(15,23,42,0.45)] transition-all duration-200 before:absolute before:inset-y-0 before:left-0 before:w-1.5",
-        statusAccentMap[segment.status] ?? "before:bg-border",
-        selected &&
-          "ring-2 ring-primary/70 ring-offset-2 ring-offset-background",
-        isTranslationError(segment.translated_text) &&
-          "border-red-300/70 bg-red-50/70 dark:border-red-900/60 dark:bg-red-950/20",
-      )}
-    >
-      <div className="flex flex-wrap items-start justify-between gap-3 border-b border-border/60 px-4 py-3">
-        <div className="flex min-w-0 items-start gap-3">
-          <input
-            type="checkbox"
-            checked={selected}
-            onChange={() => onSelect(segment.segment_id)}
-            className="h-4 w-4 rounded accent-primary"
-          />
-          <div className="min-w-0">
-            <p className="truncate text-xs font-semibold uppercase tracking-[0.2em] text-muted-foreground">
-              Segment {segment.segment_id}
-            </p>
-            <div className="mt-1 flex flex-wrap items-center gap-2">
-              <StatusPill status={segment.status} />
-              <TmMatchBadge tmMatchType={segment.tm_match_type} />
-              {isHeading && (
-                <Badge
-                  variant="outline"
-                  className="rounded-full text-[10px] font-semibold"
-                >
-                  H{segment.format_snapshot?.level ?? 1}
-                </Badge>
-              )}
-              {isTableCell && segment.row !== null && segment.col !== null && (
-                <Badge
-                  variant="outline"
-                  className="rounded-full text-[10px] font-semibold"
-                >
-                  Table r{segment.row} c{segment.col}
-                </Badge>
-              )}
-              {segment.glossary_violations &&
-                segment.glossary_violations.length > 0 && (
+      setEditingMode("none");
+    };
+
+    const isHeading = segment.type === "heading";
+    const isTableCell = segment.type === "table_cell";
+    const sourceTextClass = isHeading
+      ? "text-lg font-semibold leading-8"
+      : "text-sm leading-7";
+    const outputTextClass = isHeading
+      ? "text-base font-semibold leading-8"
+      : "text-sm leading-7";
+
+    return (
+      <motion.div
+        layout
+        initial={{ opacity: 0, y: 18 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ duration: 0.35, ease: [0.22, 1, 0.36, 1] }}
+        whileHover={{ y: -3 }}
+        style={{
+          contentVisibility: "auto",
+          containIntrinsicSize: "420px",
+        }}
+        className={cn(
+          "relative overflow-hidden rounded-[1.6rem] border border-border/70 bg-card/90 shadow-[0_18px_50px_-34px_rgba(15,23,42,0.45)] transition-all duration-200 before:absolute before:inset-y-0 before:left-0 before:w-1.5",
+          statusAccentMap[segment.status] ?? "before:bg-border",
+          selected &&
+            "ring-2 ring-primary/70 ring-offset-2 ring-offset-background",
+          isTranslationError(segment.translated_text) &&
+            "border-red-300/70 bg-red-50/70 dark:border-red-900/60 dark:bg-red-950/20",
+        )}
+      >
+        <div className="flex flex-wrap items-start justify-between gap-3 border-b border-border/60 px-4 py-3">
+          <div className="flex min-w-0 items-start gap-3">
+            <input
+              type="checkbox"
+              checked={selected}
+              onChange={() => onSelect(segment.segment_id)}
+              disabled={isApproved}
+              className="h-4 w-4 rounded accent-primary"
+            />
+            <div className="min-w-0">
+              <p className="truncate text-xs font-semibold uppercase tracking-[0.2em] text-muted-foreground">
+                Segment {segment.segment_id}
+              </p>
+              <div className="mt-1 flex flex-wrap items-center gap-2">
+                <StatusPill status={segment.status} />
+                <TmMatchBadge tmMatchType={segment.tm_match_type} />
+                {isHeading && (
                   <Badge
                     variant="outline"
-                    className="rounded-full border-amber-300/70 bg-amber-100/90 text-[10px] font-semibold text-amber-800 dark:border-amber-800/70 dark:bg-amber-950/60 dark:text-amber-200"
+                    className="rounded-full text-[10px] font-semibold"
                   >
-                    {segment.glossary_violations.length} glossary alert
+                    H{segment.format_snapshot?.level ?? 1}
                   </Badge>
                 )}
-            </div>
-          </div>
-        </div>
-
-        <div className="grid w-full grid-cols-2 gap-2 sm:flex sm:flex-wrap sm:items-center md:w-auto md:justify-end">
-          {editingMode !== "none" ? (
-            <>
-              <Button
-                size="icon-sm"
-                onClick={handleSave}
-                className="rounded-xl justify-center"
-              >
-                <Check className="h-3.5 w-3.5" />
-              </Button>
-              <Button
-                size="icon-sm"
-                variant="outline"
-                onClick={handleCancel}
-                className="rounded-xl justify-center"
-              >
-                <X className="h-3.5 w-3.5" />
-              </Button>
-            </>
-          ) : (
-            <>
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={() => void onRetry(segment)}
-                disabled={retrying}
-                className="rounded-xl"
-              >
-                {retrying ? (
-                  <Spinner className="mr-1.5 h-3.5 w-3.5" />
-                ) : (
-                  <RotateCcw className="mr-1.5 h-3.5 w-3.5" />
-                )}
-                Retranslate
-              </Button>
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={handleEditSource}
-                className="rounded-xl"
-              >
-                Edit Source
-              </Button>
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={handleEditOutput}
-                className="rounded-xl"
-              >
-                Edit Output
-              </Button>
-              <Button
-                size="icon-sm"
-                onClick={handleApprove}
-                disabled={approving || segment.status === "approved"}
-                className="rounded-xl justify-center"
-              >
-                {approving ? (
-                  <Spinner className="h-3.5 w-3.5" />
-                ) : (
-                  <Check className="h-3.5 w-3.5" />
-                )}
-              </Button>
-            </>
-          )}
-        </div>
-      </div>
-
-      <div className="grid gap-4 p-4 xl:grid-cols-[1fr_1fr]">
-        <div className="motion-card-subtle rounded-2xl border border-border/60 bg-background/65 p-4">
-          <div className="mb-2 flex items-center justify-between gap-2">
-            <p className="text-xs font-semibold uppercase tracking-[0.18em] text-muted-foreground">
-              Source
-            </p>
-            {segment.sourceEdited && (
-              <Badge variant="outline" className="rounded-full text-[10px]">
-                Local source edit
-              </Badge>
-            )}
-          </div>
-          {editingMode === "source" ? (
-            <Textarea
-              value={sourceValue}
-              onChange={(e) => setSourceValue(e.target.value)}
-              className="min-h-[144px] resize-none rounded-2xl border-border/70 bg-background/90 text-sm leading-7"
-              autoFocus
-            />
-          ) : (
-            <p className={cn("break-words text-foreground", sourceTextClass)}>
-              {segment.source_text}
-            </p>
-          )}
-          {segment.glossary_violations &&
-            segment.glossary_violations.length > 0 && (
-              <div className="mt-4 flex flex-wrap gap-2">
-                {segment.glossary_violations.map((violation, index) => (
-                  <span
-                    key={`${segment.segment_id}-glossary-${index}-${violation}`}
-                    className="inline-flex items-center gap-1 rounded-full border border-amber-300/70 bg-amber-100/90 px-2.5 py-1 text-[11px] text-amber-800 dark:border-amber-800/70 dark:bg-amber-950/60 dark:text-amber-200"
-                  >
-                    <BookOpen className="h-3 w-3" />
-                    {violation}
-                  </span>
-                ))}
-              </div>
-            )}
-        </div>
-
-        <div className="motion-card-subtle rounded-2xl border border-border/60 bg-background/65 p-4">
-          <div className="mb-2 flex items-center gap-2">
-            <p className="text-xs font-semibold uppercase tracking-[0.18em] text-muted-foreground">
-              Translated Output
-            </p>
-            <Sparkles className="h-3.5 w-3.5 text-primary" />
-          </div>
-          {editingMode === "output" ? (
-            <Textarea
-              value={outputValue}
-              onChange={(e) => setOutputValue(e.target.value)}
-              className="min-h-[144px] resize-none rounded-2xl border-border/70 bg-background/90 text-sm leading-7"
-              autoFocus
-            />
-          ) : (
-            <p
-              className={cn(
-                "break-words",
-                outputTextClass,
-                isTranslationError(segment.translated_text)
-                  ? "text-red-700 dark:text-red-300"
-                  : "text-foreground",
-                !segment.final_text &&
-                  !segment.translated_text &&
-                  "italic text-muted-foreground",
-              )}
-            >
-              {segment.final_text ||
-                segment.translated_text ||
-                "Not yet translated"}
-            </p>
-          )}
-          {(segment.tm_suggestions?.length ?? 0) > 0 && (
-            <button
-              className="mt-4 inline-flex items-center gap-1.5 text-xs font-medium text-primary transition-colors hover:text-primary/80"
-              onClick={() => setShowTM((value) => !value)}
-            >
-              <Lightbulb className="h-3.5 w-3.5" />
-              {segment.tm_suggestions!.length} suggestion
-              {segment.tm_suggestions!.length !== 1 ? "s" : ""}
-              <ChevronRight
-                className={cn(
-                  "h-3.5 w-3.5 transition-transform",
-                  showTM && "rotate-90",
-                )}
-              />
-            </button>
-          )}
-        </div>
-      </div>
-
-      {showTM &&
-        segment.tm_suggestions &&
-        segment.tm_suggestions.length > 0 && (
-          <div className="border-t border-border/60 bg-muted/35 px-4 py-4">
-            <p className="mb-3 text-xs font-semibold uppercase tracking-[0.2em] text-muted-foreground">
-              Translation Memory Suggestions
-            </p>
-            <div className="grid gap-3">
-              {segment.tm_suggestions.map((tm, index) => (
-                <div
-                  key={`${segment.segment_id}-tm-${index}-${tm.text}`}
-                  className="motion-card-subtle flex flex-col gap-3 rounded-2xl border border-border/60 bg-card/90 p-4 lg:flex-row lg:items-start lg:justify-between"
-                >
-                  <p className="flex-1 text-sm leading-7 text-foreground">
-                    {tm.text}
-                  </p>
-                  <div className="flex items-center gap-2">
+                {isTableCell &&
+                  segment.row !== null &&
+                  segment.col !== null && (
                     <Badge
                       variant="outline"
-                      className={cn(
-                        "rounded-full px-2.5 font-mono text-[11px]",
-                        tm.score >= 90
-                          ? "border-emerald-300/70 text-emerald-700 dark:border-emerald-800/70 dark:text-emerald-200"
-                          : tm.score >= 70
-                            ? "border-amber-300/70 text-amber-700 dark:border-amber-800/70 dark:text-amber-200"
-                            : "border-slate-300/70 text-slate-700 dark:border-slate-700 dark:text-slate-200",
-                      )}
+                      className="rounded-full text-[10px] font-semibold"
                     >
-                      {tm.score}%
+                      Table r{segment.row} c{segment.col}
                     </Badge>
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      className="rounded-xl"
-                      onClick={() => {
-                        onUpdateOutput(segment.segment_id, tm.text);
-                        setShowTM(false);
-                      }}
+                  )}
+                {segment.glossary_violations &&
+                  segment.glossary_violations.length > 0 && (
+                    <Badge
+                      variant="outline"
+                      className="rounded-full border-amber-300/70 bg-amber-100/90 text-[10px] font-semibold text-amber-800 dark:border-amber-800/70 dark:bg-amber-950/60 dark:text-amber-200"
                     >
-                      Use Suggestion
-                    </Button>
-                  </div>
-                </div>
-              ))}
+                      {segment.glossary_violations.length} glossary alert
+                    </Badge>
+                  )}
+              </div>
             </div>
           </div>
-        )}
-    </motion.div>
-  );
-}
+
+          <div className="grid w-full grid-cols-2 gap-2 sm:flex sm:flex-wrap sm:items-center md:w-auto md:justify-end">
+            {editingMode !== "none" ? (
+              <>
+                <Button
+                  size="icon-sm"
+                  onClick={handleSave}
+                  className="rounded-xl justify-center"
+                >
+                  <Check className="h-3.5 w-3.5" />
+                </Button>
+                <Button
+                  size="icon-sm"
+                  variant="outline"
+                  onClick={handleCancel}
+                  className="rounded-xl justify-center"
+                >
+                  <X className="h-3.5 w-3.5" />
+                </Button>
+              </>
+            ) : (
+              <>
+                {!isApproved ? (
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => void onRetry(segment)}
+                    disabled={retrying}
+                    className="rounded-xl"
+                  >
+                    {retrying ? (
+                      <Spinner className="mr-1.5 h-3.5 w-3.5" />
+                    ) : (
+                      <RotateCcw className="mr-1.5 h-3.5 w-3.5" />
+                    )}
+                    Retranslate
+                  </Button>
+                ) : null}
+                {!isApproved && canApprove ? (
+                  <Button
+                    size="icon-sm"
+                    onClick={handleApprove}
+                    disabled={approving || isApproved}
+                    className="rounded-xl justify-center"
+                  >
+                    {approving ? (
+                      <Spinner className="h-3.5 w-3.5" />
+                    ) : (
+                      <Check className="h-3.5 w-3.5" />
+                    )}
+                  </Button>
+                ) : null}
+              </>
+            )}
+          </div>
+        </div>
+
+        <div className="grid gap-4 p-4 xl:grid-cols-[1fr_1fr]">
+          <div className="motion-card-subtle rounded-2xl border border-border/60 bg-background/65 p-4">
+            <div className="mb-2 flex items-center justify-between gap-2">
+              <p className="text-xs font-semibold uppercase tracking-[0.18em] text-muted-foreground">
+                Source
+              </p>
+              <div className="flex flex-wrap items-center gap-2">
+                {!isApproved ? (
+                  <span className="text-[10px] font-medium uppercase tracking-[0.16em] text-muted-foreground/80">
+                    Double-click to edit
+                  </span>
+                ) : null}
+                {segment.sourceEdited && (
+                  <Badge variant="outline" className="rounded-full text-[10px]">
+                    Local source edit
+                  </Badge>
+                )}
+              </div>
+            </div>
+            {editingMode === "source" ? (
+              <Textarea
+                value={sourceValue}
+                onChange={(e) => setSourceValue(e.target.value)}
+                className="min-h-[144px] resize-none rounded-2xl border-border/70 bg-background/90 text-sm leading-7"
+                autoFocus
+              />
+            ) : (
+              <p
+                onDoubleClick={handleEditSource}
+                className={cn(
+                  "break-words text-foreground",
+                  sourceTextClass,
+                  !isApproved &&
+                    "cursor-text rounded-xl transition-colors hover:bg-muted/35 hover:px-2 hover:py-1",
+                )}
+              >
+                {segment.source_text}
+              </p>
+            )}
+            {segment.glossary_violations &&
+              segment.glossary_violations.length > 0 && (
+                <div className="mt-4 flex flex-wrap gap-2">
+                  {segment.glossary_violations.map((violation, index) => (
+                    <span
+                      key={`${segment.segment_id}-glossary-${index}-${violation}`}
+                      className="inline-flex items-center gap-1 rounded-full border border-amber-300/70 bg-amber-100/90 px-2.5 py-1 text-[11px] text-amber-800 dark:border-amber-800/70 dark:bg-amber-950/60 dark:text-amber-200"
+                    >
+                      <BookOpen className="h-3 w-3" />
+                      {violation}
+                    </span>
+                  ))}
+                </div>
+              )}
+          </div>
+
+          <div className="motion-card-subtle rounded-2xl border border-border/60 bg-background/65 p-4">
+            <div className="mb-2 flex items-center gap-2">
+              <p className="text-xs font-semibold uppercase tracking-[0.18em] text-muted-foreground">
+                Translated Output
+              </p>
+              <Sparkles className="h-3.5 w-3.5 text-primary" />
+              {!isApproved ? (
+                <span className="text-[10px] font-medium uppercase tracking-[0.16em] text-muted-foreground/80">
+                  Double-click to edit
+                </span>
+              ) : null}
+            </div>
+            {editingMode === "output" ? (
+              <Textarea
+                value={outputValue}
+                onChange={(e) => setOutputValue(e.target.value)}
+                className="min-h-[144px] resize-none rounded-2xl border-border/70 bg-background/90 text-sm leading-7"
+                autoFocus
+              />
+            ) : (
+              <p
+                onDoubleClick={handleEditOutput}
+                className={cn(
+                  "break-words",
+                  outputTextClass,
+                  !isApproved &&
+                    "cursor-text rounded-xl transition-colors hover:bg-muted/35 hover:px-2 hover:py-1",
+                  isTranslationError(segment.translated_text)
+                    ? "text-red-700 dark:text-red-300"
+                    : "text-foreground",
+                  !segment.final_text &&
+                    !segment.translated_text &&
+                    "italic text-muted-foreground",
+                )}
+              >
+                {segment.final_text ||
+                  segment.translated_text ||
+                  "Not yet translated"}
+              </p>
+            )}
+            {(segment.tm_suggestions?.length ?? 0) > 0 && (
+              <button
+                className="mt-4 inline-flex items-center gap-1.5 text-xs font-medium text-primary transition-colors hover:text-primary/80"
+                onClick={() => setShowTM((value) => !value)}
+              >
+                <Lightbulb className="h-3.5 w-3.5" />
+                {segment.tm_suggestions!.length} suggestion
+                {segment.tm_suggestions!.length !== 1 ? "s" : ""}
+                <ChevronRight
+                  className={cn(
+                    "h-3.5 w-3.5 transition-transform",
+                    showTM && "rotate-90",
+                  )}
+                />
+              </button>
+            )}
+          </div>
+        </div>
+
+        {showTM &&
+          segment.tm_suggestions &&
+          segment.tm_suggestions.length > 0 && (
+            <div className="border-t border-border/60 bg-muted/35 px-4 py-4">
+              <p className="mb-3 text-xs font-semibold uppercase tracking-[0.2em] text-muted-foreground">
+                Translation Memory Suggestions
+              </p>
+              <div className="grid gap-3">
+                {segment.tm_suggestions.map((tm, index) => (
+                  <div
+                    key={`${segment.segment_id}-tm-${index}-${tm.text}`}
+                    className="motion-card-subtle flex flex-col gap-3 rounded-2xl border border-border/60 bg-card/90 p-4 lg:flex-row lg:items-start lg:justify-between"
+                  >
+                    <p className="flex-1 text-sm leading-7 text-foreground">
+                      {tm.text}
+                    </p>
+                    <div className="flex items-center gap-2">
+                      <Badge
+                        variant="outline"
+                        className={cn(
+                          "rounded-full px-2.5 font-mono text-[11px]",
+                          tm.score >= 90
+                            ? "border-emerald-300/70 text-emerald-700 dark:border-emerald-800/70 dark:text-emerald-200"
+                            : tm.score >= 70
+                              ? "border-amber-300/70 text-amber-700 dark:border-amber-800/70 dark:text-amber-200"
+                              : "border-slate-300/70 text-slate-700 dark:border-slate-700 dark:text-slate-200",
+                        )}
+                      >
+                        {tm.score}%
+                      </Badge>
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        className="rounded-xl"
+                        onClick={() => {
+                          onUpdateOutput(segment.segment_id, tm.text);
+                          setShowTM(false);
+                        }}
+                      >
+                        Use Suggestion
+                      </Button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+      </motion.div>
+    );
+  },
+  (prevProps, nextProps) =>
+    prevProps.segment === nextProps.segment &&
+    prevProps.selected === nextProps.selected &&
+    prevProps.retrying === nextProps.retrying,
+);
 
 function TranslatePageContent() {
   const searchParams = useSearchParams();
@@ -643,22 +701,74 @@ function TranslatePageContent() {
   );
   const [shareOverview, setShareOverview] = useState<ShareOverviewResponse>({
     ownedByDocument: {},
+    visibleByDocument: {},
     receivedDocumentIds: [],
   });
   const [exportFormat, setExportFormat] = useState<ExportFormat>("same");
   const [exporting, setExporting] = useState(false);
+  const [visibleCount, setVisibleCount] = useState(INITIAL_SEGMENT_BATCH);
+  const [viewMode, setViewMode] = useState<ViewMode>("cards");
+  const [searchQuery, setSearchQuery] = useState("");
+  const [currentPage, setCurrentPage] = useState(1);
+  const [tablePageSize, setTablePageSize] = useState<number>(6);
+  const [inlineEditState, setInlineEditState] = useState<{
+    segmentId: string;
+    field: "source" | "output";
+    value: string;
+  } | null>(null);
   const [sourceOverrides, setSourceOverrides] = useState<
     Record<string, string>
   >({});
   const [outputOverrides, setOutputOverrides] = useState<
     Record<string, string>
   >({});
+  const loadMoreRef = useRef<HTMLDivElement | null>(null);
+  const filteredSegments = useMemo(() => {
+    const query = searchQuery.trim().toLowerCase();
+    if (!query) return segments;
 
-  const selectableIds = segments.map((segment) => segment.segment_id);
+    return segments.filter((segment) => {
+      const haystack = [
+        segment.segment_id,
+        segment.source_text,
+        segment.translated_text,
+        segment.final_text ?? "",
+      ]
+        .join(" ")
+        .toLowerCase();
+
+      return haystack.includes(query);
+    });
+  }, [searchQuery, segments]);
+  const selectableIds = filteredSegments
+    .filter((segment) => segment.status !== "approved")
+    .map((segment) => segment.segment_id);
   const allSelected =
     selectableIds.length > 0 &&
     selectableIds.every((segmentId) => selectedIds.has(segmentId));
-
+  const selectedApprovableCount = Array.from(selectedIds).filter((id) => {
+    const segment = segments.find((item) => item.segment_id === id);
+    return Boolean(
+      segment &&
+        segment.status !== "approved" &&
+        hasTranslatedOutput(segment),
+    );
+  }).length;
+  const nonCardPageSize = viewMode === "table" ? tablePageSize : 10;
+  const pageCount = Math.max(
+    1,
+    Math.ceil(filteredSegments.length / nonCardPageSize),
+  );
+  const paginatedSegments = filteredSegments.slice(
+    (currentPage - 1) * nonCardPageSize,
+    currentPage * nonCardPageSize,
+  );
+  const visibleSegments =
+    viewMode === "cards"
+      ? filteredSegments.slice(0, visibleCount)
+      : paginatedSegments;
+  const hasMoreSegments =
+    viewMode === "cards" && visibleCount < filteredSegments.length;
   useEffect(() => {
     if (!docId) return;
 
@@ -724,6 +834,38 @@ function TranslatePageContent() {
   }, [docId, outputOverrides, sourceOverrides, statusFilter]);
 
   useEffect(() => {
+    setVisibleCount(INITIAL_SEGMENT_BATCH);
+  }, [docId, statusFilter, segments.length]);
+
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [docId, statusFilter, searchQuery, viewMode]);
+
+  useEffect(() => {
+    if (viewMode !== "cards" || visibleCount >= filteredSegments.length) return;
+
+    const node = loadMoreRef.current;
+    if (!node) return;
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        const entry = entries[0];
+        if (entry?.isIntersecting) {
+          setVisibleCount((current) =>
+            Math.min(current + SEGMENT_BATCH_SIZE, filteredSegments.length),
+          );
+        }
+      },
+      {
+        rootMargin: "800px 0px",
+      },
+    );
+
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [filteredSegments.length, viewMode, visibleCount]);
+
+  useEffect(() => {
     if (!docId) {
       setExportStatus(null);
       return;
@@ -736,14 +878,22 @@ function TranslatePageContent() {
 
   useEffect(() => {
     if (!docId) {
-      setShareOverview({ ownedByDocument: {}, receivedDocumentIds: [] });
+      setShareOverview({
+        ownedByDocument: {},
+        visibleByDocument: {},
+        receivedDocumentIds: [],
+      });
       return;
     }
 
     getShareOverview()
       .then((data) => setShareOverview(data))
       .catch(() =>
-        setShareOverview({ ownedByDocument: {}, receivedDocumentIds: [] }),
+        setShareOverview({
+          ownedByDocument: {},
+          visibleByDocument: {},
+          receivedDocumentIds: [],
+        }),
       );
   }, [docId]);
 
@@ -787,13 +937,16 @@ function TranslatePageContent() {
 
   const handleTranslate = async () => {
     if (!docId) return;
-    const segmentIds = Array.from(selectedIds);
+    const segmentIds = Array.from(selectedIds).filter((id) => {
+      const segment = segments.find((item) => item.segment_id === id);
+      return Boolean(segment && segment.status !== "approved");
+    });
 
     if (segmentIds.length === 0) {
-      setTranslationMessage("Select one or more segments to translate.");
+      setTranslationMessage("Select one or more non-approved segments to translate.");
       toast({
-        title: "No segments selected",
-        description: "Choose the segments you want to translate first.",
+        title: "No eligible segments selected",
+        description: "Choose segments that are not already approved.",
         variant: "destructive",
       });
       return;
@@ -870,9 +1023,19 @@ function TranslatePageContent() {
   const handleApprove = async (
     segment: WorkspaceSegment,
     finalText: string,
-    options?: { silentSuccess?: boolean },
+    options?: { silentSuccess?: boolean; skipConfirm?: boolean },
   ) => {
     const segmentId = segment.segment_id;
+
+    if (
+      !options?.skipConfirm &&
+      typeof window !== "undefined" &&
+      !window.confirm(
+        "Approve this segment? This action is final and cannot be undone.",
+      )
+    ) {
+      return;
+    }
 
     try {
       const response = await approveSegment(segmentId, true, finalText);
@@ -936,6 +1099,9 @@ function TranslatePageContent() {
   };
 
   const toggleSelect = (id: string) => {
+    const segment = segments.find((item) => item.segment_id === id);
+    if (segment?.status === "approved") return;
+
     setSelectedIds((prev) => {
       const next = new Set(prev);
       if (next.has(id)) next.delete(id);
@@ -945,20 +1111,39 @@ function TranslatePageContent() {
   };
 
   const handleBulkApprove = async () => {
-    const count = selectedIds.size;
+    const approvableSegments = Array.from(selectedIds)
+      .map((id) => segments.find((item) => item.segment_id === id))
+      .filter((segment): segment is WorkspaceSegment => {
+        if (!segment) return false;
+        return hasTranslatedOutput(segment) && segment.status !== "approved";
+      });
+    const count = approvableSegments.length;
 
-    for (const id of selectedIds) {
-      const segment = segments.find((item) => item.segment_id === id);
-      if (segment)
-        await handleApprove(
-          segment,
-          segment.final_text || segment.translated_text,
-          { silentSuccess: true },
-        );
+    if (
+      count > 0 &&
+      typeof window !== "undefined" &&
+      !window.confirm(
+        `Approve ${count} segment${count === 1 ? "" : "s"}? These changes cannot be undone.`,
+      )
+    ) {
+      return;
+    }
+
+    for (const segment of approvableSegments) {
+      await handleApprove(segment, getSegmentOutputText(segment), {
+        silentSuccess: true,
+        skipConfirm: true,
+      });
     }
     setSelectedIds(new Set());
     if (count > 0) {
       toast({ title: `${count} segments approved` });
+    } else {
+      toast({
+        title: "No translated segments selected",
+        description: "Only translated segments can be approved.",
+        variant: "destructive",
+      });
     }
   };
 
@@ -992,6 +1177,43 @@ function TranslatePageContent() {
     }
   };
 
+  const handleOpenInlineEdit = (
+    segment: WorkspaceSegment,
+    field: "source" | "output",
+  ) => {
+    if (segment.status === "approved") return;
+
+    setInlineEditState({
+      segmentId: segment.segment_id,
+      field,
+      value:
+        field === "source"
+          ? segment.source_text
+          : getSegmentOutputText(segment),
+    });
+  };
+
+  const handleSaveInlineEdit = () => {
+    if (!inlineEditState) return;
+
+    if (inlineEditState.field === "source") {
+      handleUpdateSource(inlineEditState.segmentId, inlineEditState.value);
+    } else {
+      handleUpdateOutput(inlineEditState.segmentId, inlineEditState.value);
+    }
+
+    toast({
+      title:
+        inlineEditState.field === "source" ? "Source updated" : "Output updated",
+      description: "The segment was updated in your workspace.",
+    });
+    setInlineEditState(null);
+  };
+
+  const handleCancelInlineEdit = () => {
+    setInlineEditState(null);
+  };
+
   const completedCount = segments.filter(
     (segment) => segment.status === "reviewed" || segment.status === "approved",
   ).length;
@@ -1010,8 +1232,8 @@ function TranslatePageContent() {
     ? Math.round((completedCount / segments.length) * 100)
     : 0;
   const sharedRecipients =
-    docId && shareOverview.ownedByDocument[docId]
-      ? shareOverview.ownedByDocument[docId].recipients
+    docId && shareOverview.visibleByDocument[docId]
+      ? shareOverview.visibleByDocument[docId].participants
       : [];
   const recipientOffsets = [
     "left-[10%] top-[14%]",
@@ -1072,7 +1294,7 @@ function TranslatePageContent() {
                 <div className="absolute inset-x-0 top-0 z-10 flex items-center justify-between px-5 py-4">
                   <div>
                     <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-cyan-700/80 dark:text-cyan-100/75">
-                      Shared with
+                      Shared access
                     </p>
                     <p className="mt-1 text-sm text-slate-600 dark:text-slate-300">
                       {sharedRecipients.length > 0
@@ -1139,13 +1361,22 @@ function TranslatePageContent() {
                               </Avatar>
                               <div className="min-w-0">
                                 <p className="truncate text-sm font-semibold text-foreground">
-                                  {recipient.name || "Collaborator"}
+                                  {recipient.name ||
+                                    (recipient.role === "owner"
+                                      ? "Owner"
+                                      : "Collaborator")}
                                 </p>
                                 <p className="truncate text-xs text-muted-foreground">
-                                  {recipient.email}
+                                  {recipient.email || "No email available"}
                                 </p>
                               </div>
                             </div>
+                            <Badge
+                              variant="outline"
+                              className="rounded-full text-[10px] font-semibold uppercase tracking-[0.16em]"
+                            >
+                              {recipient.role === "owner" ? "Owner" : "Shared"}
+                            </Badge>
                           </HoverCardContent>
                         </ProfileHoverCard>
                       </motion.div>
@@ -1154,8 +1385,9 @@ function TranslatePageContent() {
                 ) : (
                   <div className="flex min-h-[16rem] items-center justify-center px-8">
                     <p className="max-w-xs text-center text-sm leading-7 text-slate-500 dark:text-slate-400">
-                      When collaborators open your share link, they'll appear
-                      here as floating presence avatars.
+                      Once this document is shared, everyone who opens it will
+                      appear here so collaborators can see the same presence
+                      view.
                     </p>
                   </div>
                 )}
@@ -1216,14 +1448,14 @@ function TranslatePageContent() {
                 >
                   {allSelected ? "Clear Selection" : "Select All"}
                 </Button>
-                {selectedIds.size > 0 && (
+                {selectedApprovableCount > 0 && (
                   <Button
                     variant="outline"
                     className="h-10 rounded-full"
                     onClick={() => void handleBulkApprove()}
                   >
                     <CheckCircle2 className="mr-2 h-4 w-4" />
-                    Bulk Accept ({selectedIds.size})
+                    Bulk Accept ({selectedApprovableCount})
                   </Button>
                 )}
                 <Button
@@ -1244,6 +1476,14 @@ function TranslatePageContent() {
                       ? segments.length
                       : segments.filter((segment) => segment.status === filter)
                           .length;
+                  const filterTone =
+                    filter === "approved"
+                      ? "border-emerald-300/80 text-emerald-700 hover:border-emerald-400 dark:border-emerald-800/80 dark:text-emerald-200 dark:hover:border-emerald-700"
+                      : filter === "reviewed"
+                        ? "border-amber-300/80 text-amber-700 hover:border-amber-400 dark:border-amber-800/80 dark:text-amber-200 dark:hover:border-amber-700"
+                        : filter === "pending"
+                          ? "border-slate-300/80 text-slate-700 hover:border-slate-400 dark:border-slate-700/80 dark:text-slate-200 dark:hover:border-slate-500"
+                          : "border-primary/35 text-primary hover:border-primary/50 dark:border-primary/40 dark:text-primary";
                   return (
                     <button
                       key={filter}
@@ -1252,7 +1492,10 @@ function TranslatePageContent() {
                         "min-w-0 rounded-full border px-4 py-2 text-sm font-medium capitalize transition-all duration-200",
                         statusFilter === filter
                           ? "border-primary bg-primary text-primary-foreground shadow-lg shadow-sky-500/15"
-                          : "border-border/70 bg-background/70 text-muted-foreground hover:border-primary/40 hover:text-foreground",
+                          : cn(
+                              "bg-background/70",
+                              filterTone,
+                            ),
                       )}
                     >
                       {filter}
@@ -1262,6 +1505,44 @@ function TranslatePageContent() {
                     </button>
                   );
                 })}
+              </div>
+            </div>
+
+            <div className="mt-4 grid gap-3 rounded-[1.5rem] border border-border/60 bg-background/75 p-4 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-end">
+              <div className="min-w-0">
+                <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">
+                  Search Segments
+                </p>
+                <Input
+                  value={searchQuery}
+                  onChange={(event) => setSearchQuery(event.target.value)}
+                  placeholder="Search source or translated text..."
+                  className="mt-2 h-11 rounded-xl border-border/70 bg-background/90"
+                />
+              </div>
+
+              <div className="grid grid-cols-3 gap-2">
+                {(
+                  [
+                    { id: "cards", label: "Normal", icon: LayoutGrid },
+                    { id: "compact", label: "Compact", icon: List },
+                    { id: "table", label: "Table", icon: Table2 },
+                  ] as const
+                ).map((view) => (
+                  <button
+                    key={view.id}
+                    onClick={() => setViewMode(view.id)}
+                    className={cn(
+                      "inline-flex h-11 items-center justify-center gap-2 rounded-xl border px-3 text-sm font-medium transition-colors",
+                      viewMode === view.id
+                        ? "border-primary bg-primary text-primary-foreground"
+                        : "border-border/70 bg-background/70 text-muted-foreground hover:border-primary/40 hover:text-foreground",
+                    )}
+                  >
+                    <view.icon className="h-4 w-4" />
+                    <span className="hidden sm:inline">{view.label}</span>
+                  </button>
+                ))}
               </div>
             </div>
 
@@ -1416,9 +1697,7 @@ function TranslatePageContent() {
                   onClick={() => void handleExport()}
                   disabled={exporting || !exportStatus?.ready_to_export}
                 >
-                  {exporting ? (
-                    <Spinner className="mr-2 h-4 w-4" />
-                  ) : null}
+                  {exporting ? <Spinner className="mr-2 h-4 w-4" /> : null}
                   Export
                 </Button>
               </div>
@@ -1468,24 +1747,458 @@ function TranslatePageContent() {
               with segments.
             </p>
           </div>
+        ) : filteredSegments.length === 0 ? (
+          <div className="glass-panel flex flex-col items-center gap-3 rounded-[2rem] py-20 text-center">
+            <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-muted">
+              <Languages className="h-6 w-6 text-muted-foreground" />
+            </div>
+            <p className="text-lg font-semibold text-foreground">
+              No matching segments
+            </p>
+            <p className="max-w-md text-sm leading-7 text-muted-foreground">
+              Try a different search term or change the current status filter.
+            </p>
+          </div>
         ) : (
-          <motion.section layout className="space-y-4 overflow-hidden">
-            <AnimatePresence mode="popLayout">
-              {segments.map((segment, index) => (
-                <SegmentRow
-                  key={`${segment.segment_id}-${index}`}
-                  segment={segment}
-                  selected={selectedIds.has(segment.segment_id)}
-                  onSelect={toggleSelect}
-                  onApprove={handleApprove}
-                  onUpdateOutput={handleUpdateOutput}
-                  onUpdateSource={handleUpdateSource}
-                  onRetry={handleRetry}
-                  retrying={retryingId === segment.segment_id}
-                />
-              ))}
-            </AnimatePresence>
-          </motion.section>
+          <>
+            {viewMode === "cards" ? (
+              <motion.section layout className="space-y-4 overflow-hidden">
+                <AnimatePresence mode="popLayout">
+                  {visibleSegments.map((segment, index) => (
+                    <SegmentRow
+                      key={`${segment.segment_id}-${index}`}
+                      segment={segment}
+                      selected={selectedIds.has(segment.segment_id)}
+                      onSelect={toggleSelect}
+                      onApprove={handleApprove}
+                      onUpdateOutput={handleUpdateOutput}
+                      onUpdateSource={handleUpdateSource}
+                      onRetry={handleRetry}
+                      retrying={retryingId === segment.segment_id}
+                    />
+                  ))}
+                </AnimatePresence>
+                {hasMoreSegments ? (
+                  <div
+                    ref={loadMoreRef}
+                    className="glass-panel flex items-center justify-between rounded-[1.4rem] border border-dashed border-border/70 px-4 py-3 text-sm text-muted-foreground"
+                  >
+                    <span>
+                      Rendering {visibleSegments.length} of{" "}
+                      {filteredSegments.length} segments
+                    </span>
+                    <Spinner className="h-4 w-4 text-primary" />
+                  </div>
+                ) : null}
+              </motion.section>
+            ) : viewMode === "compact" ? (
+              <div className="glass-panel overflow-hidden rounded-[1.75rem] border border-border/70">
+                <div className="divide-y divide-border/60">
+                  {visibleSegments.map((segment) => (
+                    <div
+                      key={segment.segment_id}
+                      className="flex flex-col gap-3 px-4 py-4 lg:flex-row lg:items-start lg:justify-between"
+                    >
+                      <div className="min-w-0 flex-1">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <input
+                            type="checkbox"
+                            checked={selectedIds.has(segment.segment_id)}
+                            onChange={() => toggleSelect(segment.segment_id)}
+                            disabled={segment.status === "approved"}
+                            className="h-4 w-4 rounded accent-primary"
+                          />
+                          <p className="text-xs font-semibold uppercase tracking-[0.18em] text-muted-foreground">
+                            {segment.segment_id}
+                          </p>
+                          <StatusPill status={segment.status} />
+                          <TmMatchBadge tmMatchType={segment.tm_match_type} />
+                        </div>
+                        {inlineEditState?.segmentId === segment.segment_id &&
+                        inlineEditState.field === "source" ? (
+                          <div className="mt-3 space-y-2">
+                            <Textarea
+                              value={inlineEditState.value}
+                              onChange={(event) =>
+                                setInlineEditState((current) =>
+                                  current
+                                    ? { ...current, value: event.target.value }
+                                    : current,
+                                )
+                              }
+                              className="min-h-28 rounded-2xl border-border/70 bg-background/90 text-sm leading-7"
+                              autoFocus
+                            />
+                            <div className="flex gap-2">
+                              <Button
+                                size="sm"
+                                className="rounded-xl"
+                                onClick={handleSaveInlineEdit}
+                              >
+                                Save
+                              </Button>
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                className="rounded-xl"
+                                onClick={handleCancelInlineEdit}
+                              >
+                                Cancel
+                              </Button>
+                            </div>
+                          </div>
+                        ) : (
+                          <p
+                            onDoubleClick={() =>
+                              handleOpenInlineEdit(segment, "source")
+                            }
+                            className={cn(
+                              "mt-3 line-clamp-2 text-sm leading-7 text-foreground",
+                              segment.status !== "approved" &&
+                                "cursor-text rounded-xl transition-colors hover:bg-muted/35 hover:px-2 hover:py-1",
+                            )}
+                          >
+                            {segment.source_text}
+                          </p>
+                        )}
+                        {inlineEditState?.segmentId === segment.segment_id &&
+                        inlineEditState.field === "output" ? (
+                          <div className="mt-2 space-y-2">
+                            <Textarea
+                              value={inlineEditState.value}
+                              onChange={(event) =>
+                                setInlineEditState((current) =>
+                                  current
+                                    ? { ...current, value: event.target.value }
+                                    : current,
+                                )
+                              }
+                              className="min-h-28 rounded-2xl border-border/70 bg-background/90 text-sm leading-7"
+                              autoFocus
+                            />
+                            <div className="flex gap-2">
+                              <Button
+                                size="sm"
+                                className="rounded-xl"
+                                onClick={handleSaveInlineEdit}
+                              >
+                                Save
+                              </Button>
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                className="rounded-xl"
+                                onClick={handleCancelInlineEdit}
+                              >
+                                Cancel
+                              </Button>
+                            </div>
+                          </div>
+                        ) : (
+                          <p
+                            onDoubleClick={() =>
+                              handleOpenInlineEdit(segment, "output")
+                            }
+                            className={cn(
+                              "mt-2 line-clamp-2 text-sm leading-7 text-muted-foreground",
+                              segment.status !== "approved" &&
+                                "cursor-text rounded-xl transition-colors hover:bg-muted/35 hover:px-2 hover:py-1",
+                            )}
+                          >
+                            {getSegmentOutputText(segment) ||
+                              "Not yet translated"}
+                          </p>
+                        )}
+                      </div>
+                      {segment.status !== "approved" ? (
+                        <div className="flex flex-wrap gap-2 lg:justify-end">
+                          <Button
+                            size="icon-sm"
+                            variant="outline"
+                            className="rounded-xl border-amber-300/80 text-amber-700 hover:bg-amber-100/80 dark:border-amber-900/70 dark:text-amber-200 dark:hover:bg-amber-950/50"
+                            onClick={() => void handleRetry(segment)}
+                            disabled={retryingId === segment.segment_id}
+                            title="Retranslate segment"
+                            aria-label={`Retranslate segment ${segment.segment_id}`}
+                          >
+                            {retryingId === segment.segment_id ? (
+                              <Spinner className="h-3.5 w-3.5" />
+                            ) : (
+                              <RotateCcw className="h-3.5 w-3.5" />
+                            )}
+                          </Button>
+                          {hasTranslatedOutput(segment) ? (
+                            <Button
+                              size="icon-sm"
+                              variant="outline"
+                              className="rounded-xl border-emerald-300/80 text-emerald-700 hover:bg-emerald-100/80 dark:border-emerald-900/70 dark:text-emerald-200 dark:hover:bg-emerald-950/50"
+                              onClick={() =>
+                                void handleApprove(
+                                  segment,
+                                  getSegmentOutputText(segment),
+                                )
+                              }
+                              title="Approve translation"
+                              aria-label={`Approve segment ${segment.segment_id}`}
+                            >
+                              <Check className="h-3.5 w-3.5" />
+                            </Button>
+                          ) : null}
+                        </div>
+                      ) : (
+                        <div className="flex items-start lg:justify-end">
+                          <Badge
+                            variant="outline"
+                            className="rounded-full border-emerald-300/80 bg-emerald-100/80 text-[10px] font-semibold uppercase tracking-[0.16em] text-emerald-800 dark:border-emerald-800/80 dark:bg-emerald-950/45 dark:text-emerald-200"
+                          >
+                            Locked
+                          </Badge>
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ) : (
+              <div className="glass-panel overflow-hidden rounded-2xl border border-border/70">
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead className="w-[64px]">Select</TableHead>
+                      <TableHead>Status</TableHead>
+                      <TableHead>Source</TableHead>
+                      <TableHead>Output</TableHead>
+                      <TableHead className="w-[180px]">Actions</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {visibleSegments.map((segment) => (
+                      <TableRow key={segment.segment_id}>
+                        <TableCell>
+                          <input
+                            type="checkbox"
+                            checked={selectedIds.has(segment.segment_id)}
+                            onChange={() => toggleSelect(segment.segment_id)}
+                            disabled={segment.status === "approved"}
+                            className="h-4 w-4 rounded accent-primary"
+                          />
+                        </TableCell>
+                        <TableCell>
+                          <div className="flex flex-wrap gap-2">
+                            <StatusPill status={segment.status} />
+                            <TmMatchBadge tmMatchType={segment.tm_match_type} />
+                          </div>
+                        </TableCell>
+                        <TableCell className="max-w-[360px] whitespace-normal">
+                          {inlineEditState?.segmentId === segment.segment_id &&
+                          inlineEditState.field === "source" ? (
+                            <div className="space-y-2">
+                              <Textarea
+                                value={inlineEditState.value}
+                                onChange={(event) =>
+                                  setInlineEditState((current) =>
+                                    current
+                                      ? { ...current, value: event.target.value }
+                                      : current,
+                                  )
+                                }
+                                className="min-h-24 rounded-2xl border-border/70 bg-background/90 text-sm leading-7"
+                                autoFocus
+                              />
+                              <div className="flex gap-2">
+                                <Button
+                                  size="sm"
+                                  className="rounded-xl"
+                                  onClick={handleSaveInlineEdit}
+                                >
+                                  Save
+                                </Button>
+                                <Button
+                                  size="sm"
+                                  variant="outline"
+                                  className="rounded-xl"
+                                  onClick={handleCancelInlineEdit}
+                                >
+                                  Cancel
+                                </Button>
+                              </div>
+                            </div>
+                          ) : (
+                            <p
+                              onDoubleClick={() =>
+                                handleOpenInlineEdit(segment, "source")
+                              }
+                              className={cn(
+                                "line-clamp-3 text-sm leading-7 text-foreground",
+                                segment.status !== "approved" &&
+                                  "cursor-text rounded-xl transition-colors hover:bg-muted/35 hover:px-2 hover:py-1",
+                              )}
+                            >
+                              {segment.source_text}
+                            </p>
+                          )}
+                        </TableCell>
+                        <TableCell className="max-w-[360px] whitespace-normal">
+                          {inlineEditState?.segmentId === segment.segment_id &&
+                          inlineEditState.field === "output" ? (
+                            <div className="space-y-2">
+                              <Textarea
+                                value={inlineEditState.value}
+                                onChange={(event) =>
+                                  setInlineEditState((current) =>
+                                    current
+                                      ? { ...current, value: event.target.value }
+                                      : current,
+                                  )
+                                }
+                                className="min-h-24 rounded-2xl border-border/70 bg-background/90 text-sm leading-7"
+                                autoFocus
+                              />
+                              <div className="flex gap-2">
+                                <Button
+                                  size="sm"
+                                  className="rounded-xl"
+                                  onClick={handleSaveInlineEdit}
+                                >
+                                  Save
+                                </Button>
+                                <Button
+                                  size="sm"
+                                  variant="outline"
+                                  className="rounded-xl"
+                                  onClick={handleCancelInlineEdit}
+                                >
+                                  Cancel
+                                </Button>
+                              </div>
+                            </div>
+                          ) : (
+                            <p
+                              onDoubleClick={() =>
+                                handleOpenInlineEdit(segment, "output")
+                              }
+                              className={cn(
+                                "line-clamp-3 text-sm leading-7 text-muted-foreground",
+                                segment.status !== "approved" &&
+                                  "cursor-text rounded-xl transition-colors hover:bg-muted/35 hover:px-2 hover:py-1",
+                              )}
+                            >
+                              {getSegmentOutputText(segment) ||
+                                "Not yet translated"}
+                            </p>
+                          )}
+                        </TableCell>
+                        <TableCell>
+                          {segment.status !== "approved" ? (
+                            <div className="flex flex-wrap gap-2">
+                              <Button
+                                size="icon-sm"
+                                variant="outline"
+                                className="rounded-xl border-amber-300/80 text-amber-700 hover:bg-amber-100/80 dark:border-amber-900/70 dark:text-amber-200 dark:hover:bg-amber-950/50"
+                                onClick={() => void handleRetry(segment)}
+                                disabled={retryingId === segment.segment_id}
+                                title="Retranslate segment"
+                                aria-label={`Retranslate segment ${segment.segment_id}`}
+                              >
+                                {retryingId === segment.segment_id ? (
+                                  <Spinner className="h-3.5 w-3.5" />
+                                ) : (
+                                  <RotateCcw className="h-3.5 w-3.5" />
+                                )}
+                              </Button>
+                              {hasTranslatedOutput(segment) ? (
+                                <Button
+                                  size="icon-sm"
+                                  variant="outline"
+                                  className="rounded-xl border-emerald-300/80 text-emerald-700 hover:bg-emerald-100/80 dark:border-emerald-900/70 dark:text-emerald-200 dark:hover:bg-emerald-950/50"
+                                  onClick={() =>
+                                    void handleApprove(
+                                      segment,
+                                      getSegmentOutputText(segment),
+                                    )
+                                  }
+                                  title="Approve translation"
+                                  aria-label={`Approve segment ${segment.segment_id}`}
+                                >
+                                  <Check className="h-3.5 w-3.5" />
+                                </Button>
+                              ) : null}
+                            </div>
+                          ) : (
+                            <Badge
+                              variant="outline"
+                              className="rounded-full border-emerald-300/80 bg-emerald-100/80 text-[10px] font-semibold uppercase tracking-[0.16em] text-emerald-800 dark:border-emerald-800/80 dark:bg-emerald-950/45 dark:text-emerald-200"
+                            >
+                              Locked
+                            </Badge>
+                          )}
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </div>
+            )}
+
+            {viewMode !== "cards" ? (
+              <div className="flex flex-col gap-3 rounded-[1.4rem] border border-border/70 bg-background/75 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+                <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:gap-4">
+                  <p className="text-sm text-muted-foreground">
+                    Page {currentPage} of {pageCount} • Showing{" "}
+                    {visibleSegments.length} of {filteredSegments.length}{" "}
+                    segments
+                  </p>
+                  {viewMode === "table" ? (
+                    <div className="flex items-center gap-2">
+                      <span className="text-sm text-muted-foreground">
+                        Rows
+                      </span>
+                      <Select
+                        value={String(tablePageSize)}
+                        onValueChange={(value) => {
+                          setTablePageSize(Number(value));
+                          setCurrentPage(1);
+                        }}
+                      >
+                        <SelectTrigger className="h-9 w-[88px] rounded-xl border-border/70 bg-background/90 text-sm">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {TABLE_PAGE_SIZE_OPTIONS.map((size) => (
+                            <SelectItem key={size} value={String(size)}>
+                              {size}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                  ) : null}
+                </div>
+                <div className="flex gap-2">
+                  <Button
+                    variant="outline"
+                    className="rounded-xl"
+                    onClick={() =>
+                      setCurrentPage((page) => Math.max(1, page - 1))
+                    }
+                    disabled={currentPage === 1}
+                  >
+                    Previous
+                  </Button>
+                  <Button
+                    variant="outline"
+                    className="rounded-xl"
+                    onClick={() =>
+                      setCurrentPage((page) => Math.min(pageCount, page + 1))
+                    }
+                    disabled={currentPage === pageCount}
+                  >
+                    Next
+                  </Button>
+                </div>
+              </div>
+            ) : null}
+          </>
         )}
       </div>
     </AppShell>
