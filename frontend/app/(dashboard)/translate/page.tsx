@@ -59,12 +59,10 @@ import {
   claimSegments,
   createShareLink,
   downloadExport,
-  clearDocumentPresence,
+  getCollaborationPresenceWebSocketUrl,
   getDocumentCollaborators,
-  getDocumentPresence,
   getExportStatus,
   getSegments,
-  heartbeatDocumentPresence,
   registerDocumentOwner,
   streamTranslateDocument,
   type CollaboratorRole,
@@ -945,18 +943,18 @@ function TranslatePageContent() {
 
     const bootstrapAccess = async () => {
       await registerDocumentOwner(docId).catch(() => undefined);
-
-      return Promise.all([
-        getDocumentCollaborators(docId),
-        heartbeatDocumentPresence(docId),
-      ]);
+      return getDocumentCollaborators(docId);
     };
 
     void bootstrapAccess()
-      .then(([collaboratorsResponse, presenceResponse]) => {
+      .then((collaboratorsResponse) => {
         if (cancelled) return;
         setCollaboratorData(collaboratorsResponse);
-        setPresenceData(presenceResponse);
+        setPresenceData({
+          documentId: docId,
+          currentRole: collaboratorsResponse.currentRole,
+          activeUsers: [],
+        });
         setCurrentRole(collaboratorsResponse.currentRole);
         setSelectedAssignee((current) =>
           current ||
@@ -971,13 +969,16 @@ function TranslatePageContent() {
         if (!bootstrapAttempted) {
           bootstrapAttempted = true;
           try {
-            const [collaboratorsResponse, presenceResponse] =
-              await bootstrapAccess();
+            const collaboratorsResponse = await bootstrapAccess();
 
             if (cancelled) return;
 
             setCollaboratorData(collaboratorsResponse);
-            setPresenceData(presenceResponse);
+            setPresenceData({
+              documentId: docId,
+              currentRole: collaboratorsResponse.currentRole,
+              activeUsers: [],
+            });
             setCurrentRole(collaboratorsResponse.currentRole);
             setSelectedAssignee((current) =>
               current ||
@@ -1013,38 +1014,68 @@ function TranslatePageContent() {
   }, [docId]);
 
   useEffect(() => {
-    if (!docId || accessDenied || !currentRole) return;
+    if (!docId || accessDenied || !currentRole || !userId) return;
 
-    const handleBeforeUnload = () => {
-      void clearDocumentPresence(docId).catch(() => undefined);
+    const socket = new WebSocket(
+      getCollaborationPresenceWebSocketUrl(docId, userId),
+    );
+    let pingTimer: number | undefined;
+
+    socket.onopen = () => {
+      pingTimer = window.setInterval(() => {
+        if (socket.readyState === WebSocket.OPEN) {
+          socket.send("ping");
+        }
+      }, 30000);
     };
 
-    const interval = window.setInterval(() => {
-      void heartbeatDocumentPresence(docId)
-        .then((response) => setPresenceData(response))
-        .catch(() => undefined);
-    }, 30000);
+    socket.onmessage = (event) => {
+      try {
+        const payload = JSON.parse(event.data) as {
+          type?: string;
+          document_id?: string;
+          active_users?: Array<{
+            id: string;
+            document_id: string;
+            collaborator_clerk_user_id: string;
+            collaborator_email: string;
+            collaborator_name: string | null;
+            role: CollaboratorRole;
+          }>;
+        };
 
-    window.addEventListener("beforeunload", handleBeforeUnload);
+        if (payload.type !== "presence") {
+          return;
+        }
+
+        const nowIso = new Date().toISOString();
+        setPresenceData({
+          documentId: payload.document_id ?? docId,
+          currentRole,
+          activeUsers: (payload.active_users ?? []).map((user) => ({
+            id: user.id,
+            documentId: user.document_id,
+            collaboratorClerkUserId: user.collaborator_clerk_user_id,
+            collaboratorEmail: user.collaborator_email,
+            collaboratorName: user.collaborator_name,
+            role: user.role,
+            lastSeenAt: nowIso,
+            createdAt: nowIso,
+            updatedAt: nowIso,
+          })),
+        });
+      } catch {
+        // Ignore malformed payloads.
+      }
+    };
 
     return () => {
-      window.removeEventListener("beforeunload", handleBeforeUnload);
-      window.clearInterval(interval);
-      void clearDocumentPresence(docId).catch(() => undefined);
+      if (pingTimer) {
+        window.clearInterval(pingTimer);
+      }
+      socket.close();
     };
-  }, [accessDenied, currentRole, docId]);
-
-  useEffect(() => {
-    if (!docId || accessDenied || !currentRole) return;
-
-    const interval = window.setInterval(() => {
-      void getDocumentPresence(docId)
-        .then((response) => setPresenceData(response))
-        .catch(() => undefined);
-    }, 10000);
-
-    return () => window.clearInterval(interval);
-  }, [accessDenied, currentRole, docId]);
+  }, [accessDenied, currentRole, docId, userId]);
 
   useEffect(() => {
     if (!docId) return;
@@ -1214,7 +1245,11 @@ function TranslatePageContent() {
 
   const startTranslationStream = async (
     segmentIds: string[],
-    options?: { isRetry?: boolean; retrySegmentId?: string },
+    options?: {
+      isRetry?: boolean;
+      retrySegmentId?: string;
+      forceLlmSegmentIds?: string[];
+    },
   ) => {
     streamControllerRef.current?.abort();
     const controller = new AbortController();
@@ -1232,6 +1267,7 @@ function TranslatePageContent() {
         targetLangRef.current,
         [],
         segmentIds,
+        options?.forceLlmSegmentIds,
         (event: TranslationStreamEvent) => {
           if (event.type === "start") {
             latestTotal = event.total_segments;
@@ -1344,6 +1380,7 @@ function TranslatePageContent() {
     await startTranslationStream([segment.segment_id], {
       isRetry: true,
       retrySegmentId: segment.segment_id,
+      forceLlmSegmentIds: [segment.segment_id],
     });
   };
 

@@ -8,6 +8,15 @@ function buildApiUrl(path: string) {
   return `${NORMALIZED_BASE_URL}/${path.replace(/^\/+/, "")}`;
 }
 
+function buildWebSocketUrl(path: string) {
+  const normalizedPath = path.replace(/^\/+/, "");
+  const wsBase = NORMALIZED_BASE_URL.replace(/^http:\/\//i, "ws://").replace(
+    /^https:\/\//i,
+    "wss://",
+  );
+  return `${wsBase}/${normalizedPath}`;
+}
+
 export const apiClient = axios.create({
   baseURL: BASE_URL,
   timeout: 30000,
@@ -40,6 +49,17 @@ export function setBackendAuthUserId(userId: string | null) {
   } else {
     delete apiClient.defaults.headers.common["X-Clerk-User-Id"];
   }
+}
+
+export function getCollaborationPresenceWebSocketUrl(
+  documentId: string,
+  clerkUserId?: string | null,
+): string {
+  const resolvedUserId = clerkUserId ?? backendAuthUserId;
+  const query = resolvedUserId
+    ? `?clerk_user_id=${encodeURIComponent(resolvedUserId)}`
+    : "";
+  return buildWebSocketUrl(`/collaboration/presence/ws/${documentId}${query}`);
 }
 
 type StreamEventHandler<T> = (event: T) => void;
@@ -412,6 +432,11 @@ export interface ShareOverviewResponse {
   receivedDocumentIds: string[];
 }
 
+export interface DashboardOverviewResponse {
+  documents: DocumentSummary[];
+  shareOverview: ShareOverviewResponse;
+}
+
 export async function uploadDocument(
   file: File,
   onUploadProgress?: (progress: number) => void,
@@ -429,14 +454,30 @@ export async function uploadDocument(
 }
 
 export async function getDocument(id: string) {
-  const res = await apiClient.get(`/document/${id}`);
-  return res.data;
+  const response = await fetch(`/api/documents/${id}`, {
+    method: 'GET',
+    cache: 'no-store',
+  });
+
+  if (!response.ok) {
+    throw new Error('Failed to load document.');
+  }
+
+  return response.json();
 }
 
 export async function getDocuments(): Promise<DocumentSummary[]> {
   return deduplicate('getDocuments', async () => {
-    const res = await apiClient.get<DocumentSummary[]>("/documents");
-    return res.data;
+    const response = await fetch('/api/documents', {
+      method: 'GET',
+      cache: 'no-store',
+    });
+
+    if (!response.ok) {
+      throw new Error('Failed to load documents.');
+    }
+
+    return response.json();
   });
 }
 
@@ -530,6 +571,7 @@ export async function streamTranslateDocument(
   targetLanguage: string,
   styleRules: string[] | undefined,
   segmentIds: string[] | undefined,
+  forceLlmSegmentIds: string[] | undefined,
   onEvent: StreamEventHandler<TranslationStreamEvent>,
   signal?: AbortSignal,
 ): Promise<void> {
@@ -540,6 +582,7 @@ export async function streamTranslateDocument(
       target_language: targetLanguage,
       style_rules: styleRules ?? [],
       segment_ids: segmentIds,
+      force_llm_segment_ids: forceLlmSegmentIds,
     },
     onEvent,
     signal,
@@ -553,10 +596,24 @@ export async function getSegments(
 ): Promise<Segment[]> {
   const key = `getSegments:${docId}:${status ?? ''}:${type ?? ''}`;
   return deduplicate(key, async () => {
-    const res = await apiClient.get<Segment[]>(`/segments/${docId}`, {
-      params: { status, type },
+    const params = new URLSearchParams();
+    if (status) params.set('status', status);
+    if (type) params.set('type', type);
+
+    const url = params.toString()
+      ? `/api/documents/${docId}/segments?${params.toString()}`
+      : `/api/documents/${docId}/segments`;
+
+    const response = await fetch(url, {
+      method: 'GET',
+      cache: 'no-store',
     });
-    return res.data;
+
+    if (!response.ok) {
+      throw new Error('Failed to load segments.');
+    }
+
+    return response.json();
   });
 }
 
@@ -842,4 +899,19 @@ export async function getShareOverview(): Promise<ShareOverviewResponse> {
 
     return response.json();
   });
+}
+
+export async function getDashboardOverview(): Promise<DashboardOverviewResponse> {
+  return deduplicate('getDashboardOverview', async () => {
+    const response = await fetch('/api/dashboard', {
+      method: 'GET',
+      cache: 'no-store',
+    })
+
+    if (!response.ok) {
+      throw new Error('Failed to load dashboard overview.')
+    }
+
+    return response.json()
+  })
 }

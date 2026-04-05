@@ -1,5 +1,9 @@
 import { create } from 'zustand'
-import { getDocuments, getShareOverview, type DocumentSummary, type ShareOverviewResponse } from '@/lib/api'
+import {
+  getDashboardOverview,
+  type DocumentSummary,
+  type ShareOverviewResponse,
+} from '@/lib/api'
 
 interface DashboardState {
   documents: DocumentSummary[]
@@ -35,6 +39,8 @@ export const useDashboardStore = create<DashboardState>((set, get) => ({
   lastFetchedDocs: 0,
   lastFetchedShares: 0,
 
+  
+
   fetchDocuments: async (force = false) => {
     const { isLoadingDocs, documents } = get()
     
@@ -44,8 +50,16 @@ export const useDashboardStore = create<DashboardState>((set, get) => ({
 
     set({ isLoadingDocs: true, errorDocs: null })
     try {
-      const data = await getDocuments()
-      set({ documents: data, lastFetchedDocs: Date.now(), errorDocs: null })
+      const data = await getDashboardOverview()
+      const now = Date.now()
+      set({
+        documents: data.documents,
+        shareOverview: data.shareOverview,
+        lastFetchedDocs: now,
+        lastFetchedShares: now,
+        errorDocs: null,
+        errorShares: null,
+      })
     } catch (error) {
       console.error('Error fetching documents in store:', error)
       set({ errorDocs: error })
@@ -63,8 +77,16 @@ export const useDashboardStore = create<DashboardState>((set, get) => ({
 
     set({ isLoadingShares: true, errorShares: null })
     try {
-      const data = await getShareOverview()
-      set({ shareOverview: data, lastFetchedShares: Date.now(), errorShares: null })
+      const data = await getDashboardOverview()
+      const now = Date.now()
+      set({
+        documents: data.documents,
+        shareOverview: data.shareOverview,
+        lastFetchedDocs: now,
+        lastFetchedShares: now,
+        errorDocs: null,
+        errorShares: null,
+      })
     } catch (error) {
       console.error('Error fetching share overview in store:', error)
       set({ errorShares: error })
@@ -74,10 +96,21 @@ export const useDashboardStore = create<DashboardState>((set, get) => ({
   },
 
   refreshAll: async () => {
-    await Promise.all([
-      get().fetchDocuments(true),
-      get().fetchShareOverview(true)
-    ])
+    set({ isLoadingDocs: true, isLoadingShares: true, errorDocs: null, errorShares: null })
+    try {
+      const data = await getDashboardOverview()
+      const now = Date.now()
+      set({
+        documents: data.documents,
+        shareOverview: data.shareOverview,
+        lastFetchedDocs: now,
+        lastFetchedShares: now,
+      })
+    } catch (error) {
+      set({ errorDocs: error, errorShares: error })
+    } finally {
+      set({ isLoadingDocs: false, isLoadingShares: false })
+    }
   },
 
   clearStore: () => {
