@@ -13,6 +13,25 @@ export const apiClient = axios.create({
   timeout: 30000,
 });
 
+// Deduplication map for concurrent GET requests
+const ongoingRequests = new Map<string, Promise<any>>();
+
+/**
+ * Wraps a promise-returning function with deduplication based on a unique key.
+ * Only one request for the same key will be in-flight at a time.
+ */
+function deduplicate<T>(key: string, fn: () => Promise<T>): Promise<T> {
+  const existing = ongoingRequests.get(key);
+  if (existing) return existing;
+
+  const promise = fn().finally(() => {
+    ongoingRequests.delete(key);
+  });
+
+  ongoingRequests.set(key, promise);
+  return promise;
+}
+
 export function setBackendAuthUserId(userId: string | null) {
   backendAuthUserId = userId;
 
@@ -428,8 +447,10 @@ export async function getDocument(id: string) {
 }
 
 export async function getDocuments(): Promise<DocumentSummary[]> {
-  const res = await apiClient.get<DocumentSummary[]>("/documents");
-  return res.data;
+  return deduplicate('getDocuments', async () => {
+    const res = await apiClient.get<DocumentSummary[]>("/documents");
+    return res.data;
+  });
 }
 
 export async function deleteDocument(id: string): Promise<void> {
@@ -543,10 +564,13 @@ export async function getSegments(
   status?: string,
   type?: string,
 ): Promise<Segment[]> {
-  const res = await apiClient.get<Segment[]>(`/segments/${docId}`, {
-    params: { status, type },
+  const key = `getSegments:${docId}:${status ?? ''}:${type ?? ''}`;
+  return deduplicate(key, async () => {
+    const res = await apiClient.get<Segment[]>(`/segments/${docId}`, {
+      params: { status, type },
+    });
+    return res.data;
   });
-  return res.data;
 }
 
 export async function getCollaborationState(
@@ -737,16 +761,19 @@ export async function registerDocumentOwner(documentId: string): Promise<void> {
 export async function getDocumentCollaborators(
   documentId: string,
 ): Promise<DocumentCollaboratorsResponse> {
-  const response = await fetch(`/api/documents/${documentId}/collaborators`, {
-    method: "GET",
-    cache: "no-store",
+  const key = `getCollaborators:${documentId}`;
+  return deduplicate(key, async () => {
+    const response = await fetch(`/api/documents/${documentId}/collaborators`, {
+      method: "GET",
+      cache: "no-store",
+    });
+
+    if (!response.ok) {
+      throw new Error("Failed to load collaborators.");
+    }
+
+    return response.json();
   });
-
-  if (!response.ok) {
-    throw new Error("Failed to load collaborators.");
-  }
-
-  return response.json();
 }
 
 export async function addDocumentCollaborator(
@@ -793,17 +820,20 @@ export async function removeDocumentCollaborator(
 export async function getDocumentPresence(
   documentId: string,
 ): Promise<DocumentPresenceResponse> {
-  const response = await fetch(`/api/documents/${documentId}/presence`, {
-    method: "GET",
-    cache: "no-store",
+  const key = `getPresence:${documentId}`;
+  return deduplicate(key, async () => {
+    const response = await fetch(`/api/documents/${documentId}/presence`, {
+      method: "GET",
+      cache: "no-store",
+    });
+
+    if (!response.ok) {
+      const payload = (await response.json().catch(() => null)) as { error?: string } | null;
+      throw new Error(payload?.error || "Failed to load presence.");
+    }
+
+    return response.json();
   });
-
-  if (!response.ok) {
-    const payload = (await response.json().catch(() => null)) as { error?: string } | null;
-    throw new Error(payload?.error || "Failed to load presence.");
-  }
-
-  return response.json();
 }
 
 export async function heartbeatDocumentPresence(
@@ -841,14 +871,16 @@ export async function clearDocumentPresence(
 }
 
 export async function getShareOverview(): Promise<ShareOverviewResponse> {
-  const response = await fetch("/api/shares", {
-    method: "GET",
-    cache: "no-store",
+  return deduplicate('getShareOverview', async () => {
+    const response = await fetch("/api/shares", {
+      method: "GET",
+      cache: "no-store",
+    });
+
+    if (!response.ok) {
+      throw new Error("Failed to load share overview.");
+    }
+
+    return response.json();
   });
-
-  if (!response.ok) {
-    throw new Error("Failed to load share overview.");
-  }
-
-  return response.json();
 }
