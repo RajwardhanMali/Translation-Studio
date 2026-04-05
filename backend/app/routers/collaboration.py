@@ -10,24 +10,17 @@ from app.models.schemas import (
     AssignSegmentsResponse,
     CollaborationStateResponse,
     DocumentCollaboratorState,
-    LockSegmentRequest,
-    LockSegmentResponse,
     SegmentAssignmentState,
-    SegmentLockState,
-    UnlockSegmentResponse,
 )
 from app.services.collaboration import (
     assign_segments,
     enrich_collaborator,
     ensure_collaboration_tables,
     find_assignee_membership_or_404,
-    get_active_lock_map,
     get_assignment_map,
     get_current_backend_collaborator,
-    lock_segment,
     require_document_membership,
     require_document_role,
-    unlock_segment,
     validate_segment_ids_for_document,
 )
 
@@ -57,16 +50,7 @@ def _assignment_state(assignment) -> SegmentAssignmentState:
     )
 
 
-def _lock_state(lock) -> SegmentLockState:
-    return SegmentLockState(
-        segment_id=lock.segment_id,
-        document_id=lock.document_id,
-        locked_by_clerk_user_id=lock.locked_by_clerk_user_id,
-        locked_by_email=lock.locked_by_email,
-        locked_by_name=lock.locked_by_name,
-        expires_at=lock.expires_at.isoformat(),
-        updated_at=lock.updated_at.isoformat() if lock.updated_at else None,
-    )
+
 
 
 @router.get("/document/{document_id}", response_model=CollaborationStateResponse)
@@ -85,14 +69,12 @@ async def get_collaboration_state(
         .all()
     )
     assignments = list(get_assignment_map(db, document_id).values())
-    locks = list(get_active_lock_map(db, document_id).values())
 
     return CollaborationStateResponse(
         document_id=document_id,
         current_role=membership.role,
         collaborators=[_collaborator_state(member) for member in collaborators],
         assignments=[_assignment_state(item) for item in assignments],
-        active_locks=[_lock_state(item) for item in locks],
     )
 
 
@@ -152,32 +134,4 @@ async def claim_document_segments(
     )
 
 
-@router.post("/lock", response_model=LockSegmentResponse)
-async def acquire_segment_lock(
-    request: LockSegmentRequest,
-    db: Session = Depends(get_db),
-    collaborator=Depends(get_current_backend_collaborator),
-):
-    ensure_collaboration_tables(db)
-    collaborator = enrich_collaborator(db, collaborator)
-    membership = require_document_role(db, request.document_id, collaborator, ["editor", "owner"])
-    validate_segment_ids_for_document(db, request.document_id, [request.segment_id])
-    lock = lock_segment(db, request.document_id, request.segment_id, collaborator, membership)
-    return LockSegmentResponse(document_id=request.document_id, lock=_lock_state(lock))
 
-
-@router.post("/unlock", response_model=UnlockSegmentResponse)
-async def release_segment_lock(
-    request: LockSegmentRequest,
-    db: Session = Depends(get_db),
-    collaborator=Depends(get_current_backend_collaborator),
-):
-    ensure_collaboration_tables(db)
-    collaborator = enrich_collaborator(db, collaborator)
-    membership = require_document_role(db, request.document_id, collaborator, ["editor", "owner"])
-    unlocked = unlock_segment(db, request.document_id, request.segment_id, collaborator, membership)
-    return UnlockSegmentResponse(
-        document_id=request.document_id,
-        segment_id=request.segment_id,
-        unlocked=unlocked,
-    )

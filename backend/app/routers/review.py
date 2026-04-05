@@ -12,13 +12,12 @@ from fastapi import APIRouter, HTTPException, Query, Depends
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.models.domain import Document, Segment as SegmentDB
+from app.models.domain import Document, Segment as SegmentDB, SegmentAssignment
 from app.models.schemas import Segment, ApproveRequest, ApproveResponse
 from app.services.collaboration import (
     attach_collaboration_fields,
     enrich_collaborator,
     ensure_collaboration_tables,
-    get_active_lock_map,
     get_assignment_map,
     get_current_backend_collaborator,
     require_document_membership,
@@ -46,20 +45,31 @@ async def get_segments(
     if not doc:
         raise HTTPException(status_code=404, detail=f"Document '{document_id}' not found.")
     ensure_collaboration_tables(db)
-    collaborator = enrich_collaborator(db, collaborator)
-    require_document_membership(db, document_id, collaborator)
-
+    membership = require_document_membership(db, document_id, collaborator)
+    
+    # Owners and Viewers see all segments.
+    # Editors see only segments assigned to them.
+    is_privileged = membership.role in ["owner", "viewer"]
+    
     query = db.query(SegmentDB).filter(SegmentDB.document_id == document_id)
     if status:
         query = query.filter(SegmentDB.status == status)
     if seg_type:
         query = query.filter(SegmentDB.type == seg_type)
         
+    if not is_privileged:
+        # For editors, only return segments assigned to this specific user.
+        query = query.join(
+            SegmentAssignment, 
+            SegmentDB.id == SegmentAssignment.segment_id
+        ).filter(
+            SegmentAssignment.assigned_to_clerk_user_id == collaborator.clerk_user_id
+        )
+
     db_segments = sort_segments(query.all())
     
     # We order by position manually if needed, or assume they are ordered
     assignments = get_assignment_map(db, document_id)
-    locks = get_active_lock_map(db, document_id)
     results = []
     for s in db_segments:
         segment_payload = attach_collaboration_fields({
@@ -85,7 +95,7 @@ async def get_segments(
             "col_widths": s.col_widths,
             "created_at": s.created_at.isoformat() if s.created_at else None,
             "updated_at": s.updated_at.isoformat() if s.updated_at else None,
-        }, assignments.get(s.id), locks.get(s.id))
+        }, assignments.get(s.id))
         results.append(Segment(**segment_payload))
         
     return results

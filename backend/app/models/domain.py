@@ -142,15 +142,4 @@ class SegmentAssignment(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
-class SegmentLock(Base):
-    __tablename__ = "segment_locks"
 
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    segment_id = Column(String, ForeignKey("segments.id", ondelete="CASCADE"), index=True, nullable=False)
-    document_id = Column(String, ForeignKey("documents.id", ondelete="CASCADE"), index=True, nullable=False)
-    locked_by_clerk_user_id = Column(String, ForeignKey("app_users.clerk_user_id", ondelete="CASCADE"), index=True, nullable=False)
-    locked_by_email = Column(String, nullable=False)
-    locked_by_name = Column(String, nullable=True)
-    expires_at = Column(DateTime, nullable=False)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

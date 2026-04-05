@@ -84,10 +84,6 @@ class Segment(BaseModel):
     assigned_to_clerk_user_id: Optional[str] = None
     assigned_to_name: Optional[str] = None
     assigned_to_email: Optional[str] = None
-    locked_by_clerk_user_id: Optional[str] = None
-    locked_by_name: Optional[str] = None
-    locked_by_email: Optional[str] = None
-    lock_expires_at: Optional[str] = None
     created_at: str = Field(default_factory=lambda: datetime.utcnow().isoformat())
     updated_at: str = Field(default_factory=lambda: datetime.utcnow().isoformat())
 
@@ -301,14 +297,7 @@ class SegmentAssignmentState(BaseModel):
     updated_at: Optional[str] = None
 
 
-class SegmentLockState(BaseModel):
-    segment_id: str
-    document_id: str
-    locked_by_clerk_user_id: str
-    locked_by_email: str
-    locked_by_name: Optional[str] = None
-    expires_at: str
-    updated_at: Optional[str] = None
+
 
 
 class DocumentCollaboratorState(BaseModel):
@@ -324,7 +313,6 @@ class CollaborationStateResponse(BaseModel):
     current_role: str
     collaborators: List[DocumentCollaboratorState]
     assignments: List[SegmentAssignmentState]
-    active_locks: List[SegmentLockState]
 
 
 class AssignSegmentsRequest(BaseModel):
@@ -338,17 +326,4 @@ class AssignSegmentsResponse(BaseModel):
     assignments: List[SegmentAssignmentState]
 
 
-class LockSegmentRequest(BaseModel):
-    document_id: str
-    segment_id: str
 
-
-class LockSegmentResponse(BaseModel):
-    document_id: str
-    lock: SegmentLockState
-
-
-class UnlockSegmentResponse(BaseModel):
-    document_id: str
-    segment_id: str
-    unlocked: bool

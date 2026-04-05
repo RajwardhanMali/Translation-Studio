@@ -182,10 +182,6 @@ export interface Segment {
   assigned_to_clerk_user_id?: string | null;
   assigned_to_name?: string | null;
   assigned_to_email?: string | null;
-  locked_by_clerk_user_id?: string | null;
-  locked_by_name?: string | null;
-  locked_by_email?: string | null;
-  lock_expires_at?: string | null;
 }
 
 export interface GlossaryTerm {
@@ -379,15 +375,7 @@ export interface CollaborationAssignment {
   updated_at?: string | null;
 }
 
-export interface CollaborationLock {
-  segment_id: string;
-  document_id: string;
-  locked_by_clerk_user_id: string;
-  locked_by_email: string;
-  locked_by_name?: string | null;
-  expires_at: string;
-  updated_at?: string | null;
-}
+
 
 export interface BackendDocumentCollaborator {
   document_id: string;
@@ -402,7 +390,6 @@ export interface CollaborationStateResponse {
   current_role: CollaboratorRole;
   collaborators: BackendDocumentCollaborator[];
   assignments: CollaborationAssignment[];
-  active_locks: CollaborationLock[];
 }
 
 export interface ShareOverviewResponse {
@@ -617,35 +604,7 @@ export async function claimSegments(
   return res.data;
 }
 
-export async function lockSegment(
-  documentId: string,
-  segmentId: string,
-): Promise<{ document_id: string; lock: CollaborationLock }> {
-  const res = await apiClient.post<{ document_id: string; lock: CollaborationLock }>(
-    "/collaboration/lock",
-    {
-      document_id: documentId,
-      segment_id: segmentId,
-    },
-    { timeout: 0 },
-  );
-  return res.data;
-}
 
-export async function unlockSegment(
-  documentId: string,
-  segmentId: string,
-): Promise<{ document_id: string; segment_id: string; unlocked: boolean }> {
-  const res = await apiClient.post<{ document_id: string; segment_id: string; unlocked: boolean }>(
-    "/collaboration/unlock",
-    {
-      document_id: documentId,
-      segment_id: segmentId,
-    },
-    { timeout: 0 },
-  );
-  return res.data;
-}
 
 export async function approveSegment(
   segmentId: string,
