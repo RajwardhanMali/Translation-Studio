@@ -55,6 +55,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { useToast } from "@/hooks/use-toast";
 import {
   approveSegment,
+  approveSegmentsBatch,
   assignSegments,
   claimSegments,
   createShareLink,
@@ -63,7 +64,6 @@ import {
   getDocumentCollaborators,
   getExportStatus,
   getSegments,
-  registerDocumentOwner,
   streamTranslateDocument,
   type CollaboratorRole,
   type DocumentCollaboratorsResponse,
@@ -937,16 +937,10 @@ function TranslatePageContent() {
     }
 
     let cancelled = false;
-    let bootstrapAttempted = false;
     setAccessLoading(true);
     setAccessDenied(null);
 
-    const bootstrapAccess = async () => {
-      await registerDocumentOwner(docId).catch(() => undefined);
-      return getDocumentCollaborators(docId);
-    };
-
-    void bootstrapAccess()
+    void getDocumentCollaborators(docId)
       .then((collaboratorsResponse) => {
         if (cancelled) return;
         setCollaboratorData(collaboratorsResponse);
@@ -965,35 +959,7 @@ function TranslatePageContent() {
         );
         setAccessDenied(null);
       })
-      .catch(async (error) => {
-        if (!bootstrapAttempted) {
-          bootstrapAttempted = true;
-          try {
-            const collaboratorsResponse = await bootstrapAccess();
-
-            if (cancelled) return;
-
-            setCollaboratorData(collaboratorsResponse);
-            setPresenceData({
-              documentId: docId,
-              currentRole: collaboratorsResponse.currentRole,
-              activeUsers: [],
-            });
-            setCurrentRole(collaboratorsResponse.currentRole);
-            setSelectedAssignee((current) =>
-              current ||
-              collaboratorsResponse.collaborators.find(
-                (collaborator) => collaborator.role === "editor",
-              )?.collaboratorClerkUserId ||
-              "",
-            );
-            setAccessDenied(null);
-            return;
-          } catch {
-            // Fall through to the standard access denied flow.
-          }
-        }
-
+      .catch((error) => {
         if (cancelled) return;
         const message =
           error instanceof Error
@@ -1539,19 +1505,68 @@ function TranslatePageContent() {
       return;
     }
 
-    for (const segment of approvableSegments) {
-      await handleApprove(segment, getSegmentOutputText(segment), {
-        silentSuccess: true,
-        skipConfirm: true,
-      });
-    }
-    setSelectedIds(new Set());
-    if (count > 0) {
-      toast({ title: `${count} segments approved` });
-    } else {
+    if (count === 0) {
       toast({
         title: "No translated segments selected",
         description: "Only translated segments can be approved.",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    try {
+      const result = await approveSegmentsBatch(
+        approvableSegments.map((segment) => ({
+          segment_id: segment.segment_id,
+          correction: getSegmentOutputText(segment),
+        })),
+      );
+
+      setOutputOverrides((prev) => {
+        const next = { ...prev };
+        for (const item of result.succeeded) {
+          delete next[item.segment_id];
+        }
+        return next;
+      });
+
+      if (statusFilter === "all") {
+        const succeededById = new Map(
+          result.succeeded.map((item) => [item.segment_id, item]),
+        );
+        setSegments((prev) =>
+          prev.map((segment) => {
+            const approved = succeededById.get(segment.segment_id);
+            if (!approved) return segment;
+            return {
+              ...segment,
+              status: approved.status as Segment["status"],
+              final_text: approved.final_text,
+            };
+          }),
+        );
+      } else {
+        await loadSegments(statusFilter);
+      }
+
+      const exportData = await getExportStatus(docId).catch(() => null);
+      setExportStatus(exportData);
+
+      setSelectedIds(new Set());
+
+      if (result.failed.length === 0) {
+        toast({ title: `${result.succeeded.length} segments approved` });
+      } else {
+        toast({
+          title: `Approved ${result.succeeded.length}, failed ${result.failed.length}`,
+          description: "Some selected segments could not be approved.",
+          variant: "destructive",
+        });
+      }
+    } catch {
+      toast({
+        title: "Batch approval failed",
+        description: "Could not approve selected segments right now.",
         variant: "destructive",
       });
     }
@@ -1589,19 +1604,39 @@ function TranslatePageContent() {
 
   const handleClaimSelected = async () => {
     if (!docId || !userId || !canModifyWorkspace) return;
-    const segmentIds = Array.from(selectedIds);
+    const segmentIds = Array.from(selectedIds).filter((id) => {
+      const segment = segments.find((item) => item.segment_id === id);
+      return Boolean(segment && segment.status !== "approved");
+    });
     if (segmentIds.length === 0) {
       toast({
-        title: "No segments selected",
-        description: "Select one or more segments to claim.",
+        title: "No eligible segments selected",
+        description: "Select one or more non-approved segments to claim.",
         variant: "destructive",
       });
       return;
     }
 
     try {
-      await claimSegments(docId, segmentIds, userId);
-      await loadSegments(statusFilter);
+      const response = await claimSegments(docId, segmentIds, userId);
+      const assignmentBySegment = new Map(
+        response.assignments.map((assignment) => [assignment.segment_id, assignment]),
+      );
+
+      setSegments((prev) =>
+        prev.map((segment) => {
+          const assignment = assignmentBySegment.get(segment.segment_id);
+          if (!assignment) return segment;
+
+          return {
+            ...segment,
+            assigned_to_clerk_user_id: assignment.assigned_to_clerk_user_id,
+            assigned_to_email: assignment.assigned_to_email,
+            assigned_to_name: assignment.assigned_to_name ?? null,
+          };
+        }),
+      );
+      setSelectedIds(new Set());
       setTranslationMessage(
         `${segmentIds.length} segment${segmentIds.length === 1 ? "" : "s"} assigned to you.`,
       );
@@ -1625,8 +1660,6 @@ function TranslatePageContent() {
       });
       return;
     }
-
-    await registerDocumentOwner(docId).catch(() => undefined);
 
     const segmentIds = Array.from(selectedIds).filter((id) => {
       const segment = segments.find((item) => item.segment_id === id);
@@ -1661,8 +1694,24 @@ function TranslatePageContent() {
     }
 
     try {
-      await assignSegments(docId, segmentIds, selectedAssignee);
-      await loadSegments(statusFilter);
+      const response = await assignSegments(docId, segmentIds, selectedAssignee);
+      const assignmentBySegment = new Map(
+        response.assignments.map((assignment) => [assignment.segment_id, assignment]),
+      );
+
+      setSegments((prev) =>
+        prev.map((segment) => {
+          const assignment = assignmentBySegment.get(segment.segment_id);
+          if (!assignment) return segment;
+
+          return {
+            ...segment,
+            assigned_to_clerk_user_id: assignment.assigned_to_clerk_user_id,
+            assigned_to_email: assignment.assigned_to_email,
+            assigned_to_name: assignment.assigned_to_name ?? null,
+          };
+        }),
+      );
       setSelectedIds(new Set());
       setTranslationMessage(
         `${segmentIds.length} segment${segmentIds.length === 1 ? "" : "s"} reassigned.`,
@@ -2020,7 +2069,7 @@ function TranslatePageContent() {
                   onClick={() => void handleClaimSelected()}
                   disabled={!canModifyWorkspace || selectedIds.size === 0}
                 >
-                  Claim Selected
+                  {currentRole === "owner" ? "Assign To Me" : "Claim Selected"}
                 </Button>
                 {selectedApprovableCount > 0 && (
                   <Button

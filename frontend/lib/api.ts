@@ -632,16 +632,24 @@ export async function assignSegments(
   segmentIds: string[],
   assigneeClerkUserId: string,
 ): Promise<{ document_id: string; assignments: CollaborationAssignment[] }> {
-  const res = await apiClient.post<{ document_id: string; assignments: CollaborationAssignment[] }>(
-    "/collaboration/assign",
-    {
+  const response = await fetch('/api/collaboration/assign', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
       document_id: documentId,
       segment_ids: segmentIds,
       assignee_clerk_user_id: assigneeClerkUserId,
-    },
-    { timeout: 0 },
-  );
-  return res.data;
+    }),
+  })
+
+  if (!response.ok) {
+    const payload = (await response.json().catch(() => null)) as { error?: string } | null
+    throw new Error(payload?.error || 'Failed to assign segments.')
+  }
+
+  return response.json()
 }
 
 export async function claimSegments(
@@ -649,16 +657,24 @@ export async function claimSegments(
   segmentIds: string[],
   assigneeClerkUserId: string,
 ): Promise<{ document_id: string; assignments: CollaborationAssignment[] }> {
-  const res = await apiClient.post<{ document_id: string; assignments: CollaborationAssignment[] }>(
-    "/collaboration/claim",
-    {
+  const response = await fetch('/api/collaboration/claim', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
       document_id: documentId,
       segment_ids: segmentIds,
       assignee_clerk_user_id: assigneeClerkUserId,
-    },
-    { timeout: 0 },
-  );
-  return res.data;
+    }),
+  })
+
+  if (!response.ok) {
+    const payload = (await response.json().catch(() => null)) as { error?: string } | null
+    throw new Error(payload?.error || 'Failed to claim segments.')
+  }
+
+  return response.json()
 }
 
 
@@ -674,6 +690,28 @@ export async function approveSegment(
     correction,
   });
   return res.data;
+}
+
+export async function approveSegmentsBatch(
+  approvals: Array<{ segment_id: string; correction?: string }>,
+): Promise<{
+  succeeded: ApproveResponse[]
+  failed: Array<{ segment_id: string; error: string }>
+}> {
+  const response = await fetch('/api/review/approve/batch', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ approvals }),
+  })
+
+  if (!response.ok) {
+    const payload = (await response.json().catch(() => null)) as { error?: string } | null
+    throw new Error(payload?.error || 'Failed to approve segments in batch.')
+  }
+
+  return response.json()
 }
 
 export async function getGlossary(): Promise<GlossaryResponse> {
