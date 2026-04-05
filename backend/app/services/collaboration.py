@@ -13,11 +13,10 @@ from app.models.domain import (
     DocumentCollaborator,
     Segment as SegmentDB,
     SegmentAssignment,
-    SegmentLock,
     User,
 )
 
-LOCK_TTL_SECONDS = 120
+
 
 
 @dataclass
@@ -63,23 +62,6 @@ def ensure_collaboration_tables(db: Session) -> None:
         """
         CREATE UNIQUE INDEX IF NOT EXISTS segment_assignments_segment_uidx
         ON segment_assignments (segment_id)
-        """,
-        """
-        CREATE TABLE IF NOT EXISTS segment_locks (
-          id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-          segment_id text NOT NULL,
-          document_id text NOT NULL,
-          locked_by_clerk_user_id text NOT NULL,
-          locked_by_email text NOT NULL,
-          locked_by_name text,
-          expires_at timestamptz NOT NULL,
-          created_at timestamptz NOT NULL DEFAULT now(),
-          updated_at timestamptz NOT NULL DEFAULT now()
-        )
-        """,
-        """
-        CREATE UNIQUE INDEX IF NOT EXISTS segment_locks_segment_uidx
-        ON segment_locks (segment_id)
         """,
     ]
 
@@ -204,26 +186,7 @@ def get_assignment_map(db: Session, document_id: str) -> Dict[str, SegmentAssign
     return {assignment.segment_id: assignment for assignment in assignments}
 
 
-def get_active_lock_map(db: Session, document_id: str) -> Dict[str, SegmentLock]:
-    now = datetime.utcnow()
-    expired = (
-        db.query(SegmentLock)
-        .filter(SegmentLock.document_id == document_id)
-        .filter(SegmentLock.expires_at <= now)
-        .all()
-    )
-    if expired:
-        for lock in expired:
-            db.delete(lock)
-        db.commit()
 
-    locks = (
-        db.query(SegmentLock)
-        .filter(SegmentLock.document_id == document_id)
-        .filter(SegmentLock.expires_at > now)
-        .all()
-    )
-    return {lock.segment_id: lock for lock in locks}
 
 
 def require_segment_assignment(
@@ -248,17 +211,11 @@ def require_segment_assignment(
 def attach_collaboration_fields(
     segment_dict: Dict,
     assignment: Optional[SegmentAssignment],
-    lock: Optional[SegmentLock],
 ) -> Dict:
     if assignment:
         segment_dict["assigned_to_clerk_user_id"] = assignment.assigned_to_clerk_user_id
         segment_dict["assigned_to_name"] = assignment.assigned_to_name
         segment_dict["assigned_to_email"] = assignment.assigned_to_email
-    if lock:
-        segment_dict["locked_by_clerk_user_id"] = lock.locked_by_clerk_user_id
-        segment_dict["locked_by_name"] = lock.locked_by_name
-        segment_dict["locked_by_email"] = lock.locked_by_email
-        segment_dict["lock_expires_at"] = lock.expires_at.isoformat()
     return segment_dict
 
 
@@ -304,66 +261,7 @@ def assign_segments(
     return results
 
 
-def lock_segment(
-    db: Session,
-    document_id: str,
-    segment_id: str,
-    collaborator: BackendCollaborator,
-    membership: DocumentCollaborator,
-) -> SegmentLock:
-    require_segment_assignment(db, document_id, [segment_id], collaborator, membership)
 
-    active_locks = get_active_lock_map(db, document_id)
-    existing = active_locks.get(segment_id)
-    now = datetime.utcnow()
-    expires_at = now + timedelta(seconds=LOCK_TTL_SECONDS)
-
-    if existing and existing.locked_by_clerk_user_id != collaborator.clerk_user_id:
-        raise HTTPException(status_code=409, detail="This segment is currently being edited by another collaborator.")
-
-    if existing:
-        existing.expires_at = expires_at
-        existing.updated_at = now
-        db.commit()
-        return existing
-
-    lock = SegmentLock(
-        segment_id=segment_id,
-        document_id=document_id,
-        locked_by_clerk_user_id=collaborator.clerk_user_id,
-        locked_by_email=collaborator.email or "",
-        locked_by_name=collaborator.name,
-        expires_at=expires_at,
-        created_at=now,
-        updated_at=now,
-    )
-    db.add(lock)
-    db.commit()
-    return lock
-
-
-def unlock_segment(
-    db: Session,
-    document_id: str,
-    segment_id: str,
-    collaborator: BackendCollaborator,
-    membership: DocumentCollaborator,
-) -> bool:
-    lock = (
-        db.query(SegmentLock)
-        .filter(SegmentLock.document_id == document_id)
-        .filter(SegmentLock.segment_id == segment_id)
-        .first()
-    )
-    if not lock:
-        return True
-
-    if membership.role != "owner" and lock.locked_by_clerk_user_id != collaborator.clerk_user_id:
-        raise HTTPException(status_code=403, detail="You cannot unlock a segment locked by another collaborator.")
-
-    db.delete(lock)
-    db.commit()
-    return True
 
 
 def find_assignee_membership_or_404(db: Session, document_id: str, clerk_user_id: str) -> User:

@@ -18,7 +18,6 @@ from app.services.collaboration import (
     attach_collaboration_fields,
     enrich_collaborator,
     ensure_collaboration_tables,
-    get_active_lock_map,
     get_assignment_map,
     get_current_backend_collaborator,
     require_document_role,
@@ -406,13 +405,12 @@ async def translate_document(
     )
 
     assignments = get_assignment_map(db, request.document_id)
-    locks = get_active_lock_map(db, request.document_id)
 
     return TranslateResponse(
         document_id=request.document_id,
         segments_translated=translated_count,
         segments=[
-            Segment(**attach_collaboration_fields(segment, assignments.get(segment["id"]), locks.get(segment["id"])))
+            Segment(**attach_collaboration_fields(segment, assignments.get(segment["id"])))
             for segment in all_segments
         ],
     )
@@ -479,13 +477,11 @@ async def translate_document_stream(
             completed += len(updated_segments)
 
             assignments = get_assignment_map(db, request.document_id)
-            locks = get_active_lock_map(db, request.document_id)
 
             for updated_segment in sort_segments(updated_segments):
                 payload = attach_collaboration_fields(
                     updated_segment,
                     assignments.get(updated_segment["id"]),
-                    locks.get(updated_segment["id"]),
                 )
                 yield _stream_event(
                     "segment",

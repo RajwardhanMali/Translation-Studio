@@ -65,9 +65,7 @@ import {
   getExportStatus,
   getSegments,
   heartbeatDocumentPresence,
-  lockSegment,
   streamTranslateDocument,
-  unlockSegment,
   type CollaboratorRole,
   type DocumentCollaboratorsResponse,
   type DocumentPresenceResponse,
@@ -206,16 +204,6 @@ function normalizeSegment(
       typeof raw.assigned_to_email === "string"
         ? raw.assigned_to_email
         : null,
-    locked_by_clerk_user_id:
-      typeof raw.locked_by_clerk_user_id === "string"
-        ? raw.locked_by_clerk_user_id
-        : null,
-    locked_by_name:
-      typeof raw.locked_by_name === "string" ? raw.locked_by_name : null,
-    locked_by_email:
-      typeof raw.locked_by_email === "string" ? raw.locked_by_email : null,
-    lock_expires_at:
-      typeof raw.lock_expires_at === "string" ? raw.lock_expires_at : null,
   };
 }
 
@@ -399,9 +387,6 @@ const SegmentRow = memo(
 
     const canApprove = canApproveSegment && hasTranslatedOutput(segment);
     const isApproved = segment.status === "approved";
-    const lockedByOther =
-      !!segment.locked_by_clerk_user_id &&
-      segment.locked_by_clerk_user_id !== currentUserId;
 
     const statusAccentMap: Record<string, string> = {
       pending: "before:bg-slate-400",
@@ -515,14 +500,7 @@ const SegmentRow = memo(
                     Unassigned
                   </Badge>
                 )}
-                {lockedByOther ? (
-                  <Badge
-                    variant="outline"
-                    className="rounded-full border-rose-300/80 text-[10px] font-semibold text-rose-700 dark:border-rose-900/70 dark:text-rose-200"
-                  >
-                    Editing: {segment.locked_by_name || segment.locked_by_email || "teammate"}
-                  </Badge>
-                ) : null}
+
                 {isHeading && (
                   <Badge
                     variant="outline"
@@ -854,22 +832,16 @@ function TranslatePageContent() {
     [collaboratorData],
   );
 
-  const isSegmentLockedByOther = (segment: WorkspaceSegment) =>
-    Boolean(
-      segment.locked_by_clerk_user_id &&
-        segment.locked_by_clerk_user_id !== userId,
-    );
+
 
   const canOperateSegment = (segment: WorkspaceSegment) => {
     if (!canModifyWorkspace) return false;
-    if (isSegmentLockedByOther(segment)) return false;
     if (currentRole === "owner") return true;
     return segment.assigned_to_clerk_user_id === userId;
   };
 
   const canApproveSegment = (segment: WorkspaceSegment) => {
     if (!canApproveSegments) return false;
-    if (isSegmentLockedByOther(segment)) return false;
     return segment.assigned_to_clerk_user_id === userId;
   };
 
@@ -1593,54 +1565,11 @@ function TranslatePageContent() {
       });
       return false;
     }
-
-    try {
-      const response = await lockSegment(docId, segment.segment_id);
-      setSegments((prev) =>
-        prev.map((item) =>
-          item.segment_id === segment.segment_id
-            ? {
-                ...item,
-                locked_by_clerk_user_id: response.lock.locked_by_clerk_user_id,
-                locked_by_email: response.lock.locked_by_email,
-                locked_by_name: response.lock.locked_by_name ?? undefined,
-                lock_expires_at: response.lock.expires_at,
-              }
-            : item,
-        ),
-      );
-      return true;
-    } catch (error) {
-      toast({
-        title: "Could not start editing",
-        description:
-          error instanceof Error ? error.message : "This segment is currently locked.",
-        variant: "destructive",
-      });
-      return false;
-    }
+    return true;
   };
 
   const finishSegmentEdit = async (segment: WorkspaceSegment) => {
-    if (!docId) return;
-    try {
-      await unlockSegment(docId, segment.segment_id);
-      setSegments((prev) =>
-        prev.map((item) =>
-          item.segment_id === segment.segment_id
-            ? {
-                ...item,
-                locked_by_clerk_user_id: undefined,
-                locked_by_email: undefined,
-                locked_by_name: undefined,
-                lock_expires_at: undefined,
-              }
-            : item,
-        ),
-      );
-    } catch {
-      // Keep the last known lock badge if the unlock fails; the backend TTL will clean it up.
-    }
+    // No longer needs to unlock since lock logic is removed.
   };
 
   const handleOpenInlineEdit = (
@@ -2198,7 +2127,7 @@ function TranslatePageContent() {
               </div>
             )}
 
-            <div className="mt-5 grid gap-3 rounded-[1.5rem] border border-border/60 bg-background/75 p-4 xl:grid-cols-[minmax(0,0.9fr)_minmax(0,0.9fr)_auto] xl:items-end">
+            { currentRole != "viewer" && <div className="mt-5 grid gap-3 rounded-[1.5rem] border border-border/60 bg-background/75 p-4 xl:grid-cols-[minmax(0,0.9fr)_minmax(0,0.9fr)_auto] xl:items-end">
               <div className="min-w-0">
                 <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">
                   Target Language
@@ -2272,7 +2201,7 @@ function TranslatePageContent() {
                   Export
                 </Button>
               </div>
-            </div>
+            </div>}
           </Reveal>
         </section>
 
