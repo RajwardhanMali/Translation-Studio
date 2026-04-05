@@ -115,7 +115,7 @@ async def approve_segment(
         raise HTTPException(status_code=404, detail=f"Segment '{request.segment_id}' not found.")
     ensure_collaboration_tables(db)
     collaborator = enrich_collaborator(db, collaborator)
-    membership = require_document_role(db, seg.document_id, collaborator, ["editor"])
+    membership = require_document_role(db, seg.document_id, collaborator, ["owner", "editor"])
     require_segment_assignment(db, seg.document_id, [seg.id], collaborator, membership)
 
     if request.correction:

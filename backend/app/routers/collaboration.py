@@ -118,8 +118,14 @@ async def claim_document_segments(
     if membership.role == "editor" and request.assignee_clerk_user_id != collaborator.clerk_user_id:
         raise HTTPException(status_code=403, detail="Editors can only claim segments for themselves.")
 
-    assignee_user_id = collaborator.clerk_user_id if membership.role == "editor" else request.assignee_clerk_user_id
-    assignee = find_assignee_membership_or_404(db, request.document_id, assignee_user_id)
+    # Claim is always self-claim for the authenticated collaborator.
+    assignee_user_id = collaborator.clerk_user_id
+    assignee = find_assignee_membership_or_404(
+        db,
+        request.document_id,
+        assignee_user_id,
+        allow_non_editors=True,
+    )
 
     assignments = assign_segments(
         db=db,

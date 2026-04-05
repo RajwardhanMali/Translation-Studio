@@ -264,7 +264,12 @@ def assign_segments(
 
 
 
-def find_assignee_membership_or_404(db: Session, document_id: str, clerk_user_id: str) -> User:
+def find_assignee_membership_or_404(
+    db: Session,
+    document_id: str,
+    clerk_user_id: str,
+    allow_non_editors: bool = False,
+) -> User:
     collaborator = (
         db.query(DocumentCollaborator)
         .filter(DocumentCollaborator.document_id == document_id)
@@ -273,7 +278,7 @@ def find_assignee_membership_or_404(db: Session, document_id: str, clerk_user_id
     )
     if not collaborator:
         raise HTTPException(status_code=404, detail="Assignee is not a collaborator on this document.")
-    if collaborator.role != "editor":
+    if not allow_non_editors and collaborator.role != "editor":
         raise HTTPException(status_code=400, detail="Segments can only be assigned to editors.")
 
     user = db.query(User).filter(User.clerk_user_id == clerk_user_id).first()
