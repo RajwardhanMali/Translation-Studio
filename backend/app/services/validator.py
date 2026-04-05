@@ -16,6 +16,7 @@ Architecture:
 import re
 import json
 import logging
+import time
 from typing import List, Tuple, Dict, Optional, Any
 from collections import Counter
 
@@ -339,6 +340,7 @@ def _ai_validate_batch(
     segments: List[Dict],
     batch_size: int = 20,
     document_context: Optional[Dict] = None,
+    inter_batch_delay: float = 5.0,
 ) -> Dict[str, Optional[List[Dict]]]:
     """
     Batch AI validation logic.
@@ -362,7 +364,9 @@ def _ai_validate_batch(
     if not valid_segments:
         return results
 
-    for i in range(0, len(valid_segments), batch_size):
+    total_batches = (len(valid_segments) + batch_size - 1) // batch_size
+
+    for batch_idx, i in enumerate(range(0, len(valid_segments), batch_size)):
         batch = valid_segments[i:i + batch_size]
 
         segments_block = ""
@@ -383,10 +387,10 @@ def _ai_validate_batch(
         user = _BATCH_VALIDATION_USER_PROMPT.format(segments_block=segments_block)
 
         try:
-            logger.info(f"Dispatching AI Validation Batch {i//batch_size + 1}")
+            logger.info(f"Dispatching AI Validation Batch {batch_idx + 1}/{total_batches}")
             raw_response = _call_llm(system, user, max_tokens=4096)
         except Exception as e:
-            logger.warning(f"AI batch validation failed (429 or Timeout) for batch {i//batch_size + 1}: {e}")
+            logger.warning(f"AI batch validation failed (429 or Timeout) for batch {batch_idx + 1}/{total_batches}: {e}")
             for seg in batch:
                 results[seg.get("id", "")] = None # None denotes API Failure, not a clean text array
             continue
@@ -429,6 +433,11 @@ def _ai_validate_batch(
                     normalized.append(n)
 
             results[sid] = normalized
+
+        # Add delay between batches to prevent rate limiting
+        if batch_idx < total_batches - 1:
+            logger.info(f"Sleeping {inter_batch_delay}s before next validation batch")
+            time.sleep(inter_batch_delay)
 
     return results
 

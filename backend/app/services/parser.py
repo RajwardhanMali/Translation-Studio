@@ -24,6 +24,7 @@ document regeneration service to rebuild the file after translation.
 """
 
 import logging
+import sys
 import uuid
 import re
 from pathlib import Path
@@ -417,10 +418,23 @@ def parse_pdf(filepath: Path, document_id: str) -> List[Dict[str, Any]]:
     """
     try:
         import fitz
+        bad_fitz = False
+        if not hasattr(fitz, "open"):
+            bad_fitz = True
+        elif hasattr(fitz, "__file__"):
+            locked = fitz.__file__.replace("/", "\\").lower()
+            if "site-packages\\fitz\\__init__.py" in locked:
+                bad_fitz = True
+        if bad_fitz:
+            raise ImportError("Imported wrong fitz package")
     except ImportError:
-        raise RuntimeError("PyMuPDF (fitz) is not installed.")
+        try:
+            import pymupdf as fitz
+            sys.modules["fitz"] = fitz
+        except ImportError:
+            raise RuntimeError("PyMuPDF (fitz) is not installed.")
 
-    doc   = fitz.open(str(filepath))
+    doc = fitz.open(str(filepath))
     blocks: List[Dict] = []
     block_index = 0
 
