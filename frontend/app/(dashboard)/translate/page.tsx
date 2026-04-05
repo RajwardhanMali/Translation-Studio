@@ -201,9 +201,7 @@ function normalizeSegment(
     assigned_to_name:
       typeof raw.assigned_to_name === "string" ? raw.assigned_to_name : null,
     assigned_to_email:
-      typeof raw.assigned_to_email === "string"
-        ? raw.assigned_to_email
-        : null,
+      typeof raw.assigned_to_email === "string" ? raw.assigned_to_email : null,
   };
 }
 
@@ -245,7 +243,9 @@ function isTranslationError(text: string | undefined) {
   );
 }
 
-function getSegmentOutputText(segment: Pick<Segment, "final_text" | "translated_text">) {
+function getSegmentOutputText(
+  segment: Pick<Segment, "final_text" | "translated_text">,
+) {
   return segment.final_text || segment.translated_text || "";
 }
 
@@ -615,16 +615,16 @@ const SegmentRow = memo(
                 autoFocus
               />
             ) : (
-                  <p
-                    onDoubleClick={handleEditSource}
-                    className={cn(
-                      "break-words text-foreground",
+              <p
+                onDoubleClick={handleEditSource}
+                className={cn(
+                  "break-words text-foreground",
                   sourceTextClass,
                   !isApproved &&
                     canOperateSegment &&
                     "cursor-text rounded-xl transition-colors hover:bg-muted/35 hover:px-2 hover:py-1",
-                    )}
-                  >
+                )}
+              >
                 {segment.source_text}
               </p>
             )}
@@ -815,7 +815,7 @@ function TranslatePageContent() {
   const streamControllerRef = useRef<AbortController | null>(null);
   // Keep a ref to the current targetLang so memoized SegmentRow callbacks
   // always read the latest value (avoids stale closure in handleRetry).
-  
+
   const targetLangRef = useRef(targetLang);
   useEffect(() => {
     targetLangRef.current = targetLang;
@@ -823,7 +823,8 @@ function TranslatePageContent() {
 
   const canModifyWorkspace =
     currentRole === "owner" || currentRole === "editor";
-  const canApproveSegments = currentRole === "editor";
+  const canApproveSegments =
+    currentRole === "owner" || currentRole === "editor";
   const assignableCollaborators = useMemo(
     () =>
       (collaboratorData?.collaborators ?? []).filter(
@@ -831,8 +832,6 @@ function TranslatePageContent() {
       ),
     [collaboratorData],
   );
-
-
 
   const canOperateSegment = (segment: WorkspaceSegment) => {
     if (!canModifyWorkspace) return false;
@@ -842,6 +841,7 @@ function TranslatePageContent() {
 
   const canApproveSegment = (segment: WorkspaceSegment) => {
     if (!canApproveSegments) return false;
+    if (currentRole === "owner") return true;
     return segment.assigned_to_clerk_user_id === userId;
   };
 
@@ -878,9 +878,9 @@ function TranslatePageContent() {
     const segment = segments.find((item) => item.segment_id === id);
     return Boolean(
       segment &&
-        segment.status !== "approved" &&
-        hasTranslatedOutput(segment) &&
-        canApproveSegment(segment),
+      segment.status !== "approved" &&
+      hasTranslatedOutput(segment) &&
+      canApproveSegment(segment),
     );
   }).length;
   const nonCardPageSize = viewMode === "table" ? tablePageSize : 10;
@@ -929,12 +929,13 @@ function TranslatePageContent() {
         setCollaboratorData(collaboratorsResponse);
         setPresenceData(presenceResponse);
         setCurrentRole(collaboratorsResponse.currentRole);
-        setSelectedAssignee((current) =>
-          current ||
-          collaboratorsResponse.collaborators.find(
-            (collaborator) => collaborator.role === "editor",
-          )?.collaboratorClerkUserId ||
-          "",
+        setSelectedAssignee(
+          (current) =>
+            current ||
+            collaboratorsResponse.collaborators.find(
+              (collaborator) => collaborator.role === "editor",
+            )?.collaboratorClerkUserId ||
+            "",
         );
         setAccessDenied(null);
       })
@@ -1168,7 +1169,11 @@ function TranslatePageContent() {
 
     setTranslating(true);
     setTranslationMessage(null);
-    setStreamProgress({ completed: 0, total: segmentIds.length, translated: 0 });
+    setStreamProgress({
+      completed: 0,
+      total: segmentIds.length,
+      translated: 0,
+    });
     let latestTranslated = 0;
     let latestTotal = segmentIds.length;
 
@@ -1254,11 +1259,15 @@ function TranslatePageContent() {
     if (!docId || !canModifyWorkspace) return;
     const segmentIds = Array.from(selectedIds).filter((id) => {
       const segment = segments.find((item) => item.segment_id === id);
-      return Boolean(segment && segment.status !== "approved" && canOperateSegment(segment));
+      return Boolean(
+        segment && segment.status !== "approved" && canOperateSegment(segment),
+      );
     });
 
     if (segmentIds.length === 0) {
-      setTranslationMessage("Select one or more non-approved segments to translate.");
+      setTranslationMessage(
+        "Select one or more non-approved segments to translate.",
+      );
       toast({
         title: "No eligible segments selected",
         description: "Choose segments that are not already approved.",
@@ -1274,7 +1283,8 @@ function TranslatePageContent() {
     if (!canOperateSegment(segment)) {
       toast({
         title: "Segment unavailable",
-        description: "This segment must be assigned to you before retranslation.",
+        description:
+          "This segment must be assigned to you before retranslation.",
         variant: "destructive",
       });
       return;
@@ -1298,7 +1308,11 @@ function TranslatePageContent() {
 
     setExporting(true);
     try {
-      const filename = await downloadExport(docId, exportFormat);
+      const filename = await downloadExport(
+        docId,
+        exportFormat,
+        currentRole === "owner",
+      );
       toast({ title: "Export started", description: filename });
     } catch {
       toast({
@@ -1319,7 +1333,8 @@ function TranslatePageContent() {
     if (!canApproveSegments) {
       toast({
         title: "Approval restricted",
-        description: "Only editors can approve segments in the shared workspace.",
+        description:
+          "Only owners and editors can approve segments in the shared workspace.",
         variant: "destructive",
       });
       return;
@@ -1424,7 +1439,8 @@ function TranslatePageContent() {
     if (!canApproveSegments) {
       toast({
         title: "Approval restricted",
-        description: "Only editors can approve segments in the shared workspace.",
+        description:
+          "Only owners and editors can approve segments in the shared workspace.",
         variant: "destructive",
       });
       return;
@@ -1518,7 +1534,9 @@ function TranslatePageContent() {
       toast({
         title: "Could not claim segments",
         description:
-          error instanceof Error ? error.message : "The selected segments could not be claimed.",
+          error instanceof Error
+            ? error.message
+            : "The selected segments could not be claimed.",
         variant: "destructive",
       });
     }
@@ -1546,7 +1564,9 @@ function TranslatePageContent() {
       toast({
         title: "Could not assign segments",
         description:
-          error instanceof Error ? error.message : "The selected segments could not be assigned.",
+          error instanceof Error
+            ? error.message
+            : "The selected segments could not be assigned.",
         variant: "destructive",
       });
     }
@@ -1602,7 +1622,9 @@ function TranslatePageContent() {
 
     toast({
       title:
-        inlineEditState.field === "source" ? "Source updated" : "Output updated",
+        inlineEditState.field === "source"
+          ? "Source updated"
+          : "Output updated",
       description: "The segment was updated in your workspace.",
     });
     const currentSegment = segments.find(
@@ -1684,835 +1706,680 @@ function TranslatePageContent() {
               {accessDenied}
             </p>
           </div>
-          <Button variant="outline" className="rounded-xl" onClick={() => router.push("/documents")}>
+          <Button
+            variant="outline"
+            className="rounded-xl"
+            onClick={() => router.push("/documents")}
+          >
             Back to documents
           </Button>
         </div>
       ) : (
-      <div className="space-y-6">
-        <Reveal className="glass-panel hero-sheen overflow-hidden rounded-[2rem]">
-          <div className="grid gap-6 px-6 py-6 lg:grid-cols-[minmax(0,1.15fr)_minmax(280px,0.85fr)] lg:px-8 lg:py-8">
-            <div className="min-w-0">
-              <motion.div
-                initial={{ opacity: 0, y: 12 }}
-                whileInView={{ opacity: 1, y: 0 }}
-                viewport={{ once: true, amount: 0.4 }}
-                transition={{
-                  duration: 0.4,
-                  delay: 0.08,
-                  ease: [0.22, 1, 0.36, 1],
-                }}
-                className="inline-flex items-center gap-2 rounded-full border border-border/60 bg-background/70 px-3 py-1 text-xs font-medium text-muted-foreground"
-              >
-                <WandSparkles className="h-3.5 w-3.5 text-primary" />
-                Structured translation workspace
-              </motion.div>
-              <h2 className="mt-4 max-w-2xl text-3xl font-semibold tracking-tight text-foreground md:text-4xl">
-                Review translations faster with a cleaner, calmer editor.
-              </h2>
-              <p className="mt-3 max-w-2xl text-sm leading-7 text-muted-foreground md:text-base">
-                Generate drafts, inspect glossary risks, compare translation
-                memory suggestions, and approve final copy without losing focus.
-              </p>
-            </div>
+        <div className="space-y-6">
+          <Reveal className="glass-panel hero-sheen overflow-hidden rounded-[2rem]">
+            <div className="grid gap-6 px-6 py-6 lg:grid-cols-[minmax(0,1.15fr)_minmax(280px,0.85fr)] lg:px-8 lg:py-8">
+              <div className="min-w-0">
+                <motion.div
+                  initial={{ opacity: 0, y: 12 }}
+                  whileInView={{ opacity: 1, y: 0 }}
+                  viewport={{ once: true, amount: 0.4 }}
+                  transition={{
+                    duration: 0.4,
+                    delay: 0.08,
+                    ease: [0.22, 1, 0.36, 1],
+                  }}
+                  className="inline-flex items-center gap-2 rounded-full border border-border/60 bg-background/70 px-3 py-1 text-xs font-medium text-muted-foreground"
+                >
+                  <WandSparkles className="h-3.5 w-3.5 text-primary" />
+                  Structured translation workspace
+                </motion.div>
+                <h2 className="mt-4 max-w-2xl text-3xl font-semibold tracking-tight text-foreground md:text-4xl">
+                  Review translations faster with a cleaner, calmer editor.
+                </h2>
+                <p className="mt-3 max-w-2xl text-sm leading-7 text-muted-foreground md:text-base">
+                  Generate drafts, inspect glossary risks, compare translation
+                  memory suggestions, and approve final copy without losing
+                  focus.
+                </p>
+              </div>
 
-            <div className="hidden lg:block">
-              <div className="relative min-h-[16rem] overflow-hidden rounded-[1.75rem] border border-border/50 bg-[linear-gradient(180deg,rgba(255,255,255,0.72),rgba(245,249,255,0.45))] shadow-[0_28px_80px_-55px_rgba(14,116,144,0.35)] dark:bg-[linear-gradient(180deg,rgba(7,15,28,0.8),rgba(8,16,30,0.56))] dark:shadow-[0_28px_80px_-55px_rgba(8,145,178,0.42)]">
-                <div className="absolute inset-0 bg-[radial-gradient(circle_at_20%_20%,rgba(34,211,238,0.1),transparent_28%),radial-gradient(circle_at_80%_18%,rgba(59,130,246,0.12),transparent_24%),radial-gradient(circle_at_48%_82%,rgba(45,212,191,0.12),transparent_22%)] dark:bg-[radial-gradient(circle_at_20%_20%,rgba(34,211,238,0.12),transparent_28%),radial-gradient(circle_at_80%_18%,rgba(59,130,246,0.14),transparent_24%),radial-gradient(circle_at_48%_82%,rgba(45,212,191,0.12),transparent_22%)]" />
-                <div className="absolute inset-x-0 top-0 z-10 flex items-center justify-between px-5 py-4">
-                  <div>
-                    <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-cyan-700/80 dark:text-cyan-100/75">
-                      Shared access
-                    </p>
-                    <p className="mt-1 text-sm text-slate-600 dark:text-slate-300">
-                      {sharedRecipients.length > 0
-                        ? `${sharedRecipients.length} active now, ${totalCollaborators} collaborator${totalCollaborators === 1 ? "" : "s"} total`
-                        : totalCollaborators > 0
-                          ? `${totalCollaborators} collaborator${totalCollaborators === 1 ? "" : "s"} attached to this document`
-                          : "Add collaborators from the documents page to begin sharing this workspace"}
-                    </p>
+              <div className="hidden lg:block">
+                <div className="relative min-h-[16rem] overflow-hidden rounded-[1.75rem] border border-border/50 bg-[linear-gradient(180deg,rgba(255,255,255,0.72),rgba(245,249,255,0.45))] shadow-[0_28px_80px_-55px_rgba(14,116,144,0.35)] dark:bg-[linear-gradient(180deg,rgba(7,15,28,0.8),rgba(8,16,30,0.56))] dark:shadow-[0_28px_80px_-55px_rgba(8,145,178,0.42)]">
+                  <div className="absolute inset-0 bg-[radial-gradient(circle_at_20%_20%,rgba(34,211,238,0.1),transparent_28%),radial-gradient(circle_at_80%_18%,rgba(59,130,246,0.12),transparent_24%),radial-gradient(circle_at_48%_82%,rgba(45,212,191,0.12),transparent_22%)] dark:bg-[radial-gradient(circle_at_20%_20%,rgba(34,211,238,0.12),transparent_28%),radial-gradient(circle_at_80%_18%,rgba(59,130,246,0.14),transparent_24%),radial-gradient(circle_at_48%_82%,rgba(45,212,191,0.12),transparent_22%)]" />
+                  <div className="absolute inset-x-0 top-0 z-10 flex items-center justify-between px-5 py-4">
+                    <div>
+                      <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-cyan-700/80 dark:text-cyan-100/75">
+                        Shared access
+                      </p>
+                      <p className="mt-1 text-sm text-slate-600 dark:text-slate-300">
+                        {sharedRecipients.length > 0
+                          ? `${sharedRecipients.length} active now, ${totalCollaborators} collaborator${totalCollaborators === 1 ? "" : "s"} total`
+                          : totalCollaborators > 0
+                            ? `${totalCollaborators} collaborator${totalCollaborators === 1 ? "" : "s"} attached to this document`
+                            : "Add collaborators from the documents page to begin sharing this workspace"}
+                      </p>
+                    </div>
+                    <div className="rounded-full border border-cyan-300/25 bg-white/60 px-3 py-1 text-xs text-slate-600 dark:border-white/10 dark:bg-white/5 dark:text-slate-300">
+                      {currentRole ? `${currentRole} access` : "Live access"}
+                    </div>
                   </div>
-                  <div className="rounded-full border border-cyan-300/25 bg-white/60 px-3 py-1 text-xs text-slate-600 dark:border-white/10 dark:bg-white/5 dark:text-slate-300">
-                    {currentRole ? `${currentRole} access` : "Live access"}
-                  </div>
-                </div>
 
-                {sharedRecipients.length > 0 ? (
-                  <div className="relative h-full min-h-[16rem] mt-10">
-                    {sharedRecipients.slice(0, 6).map((recipient, index) => (
-                      <motion.div
-                        key={`${recipient.collaboratorClerkUserId}-${index}`}
-                        className={`absolute ${recipientOffsets[index % recipientOffsets.length]}`}
-                        animate={{
-                          y: [0, -10, 0],
-                          rotate: [0, index % 2 === 0 ? 2 : -2, 0],
-                        }}
-                        transition={{
-                          duration: 5.8 + index * 0.35,
-                          repeat: Infinity,
-                          repeatType: "mirror",
-                          ease: "easeInOut",
-                          delay: index * 0.18,
-                        }}
-                      >
-                        <ProfileHoverCard openDelay={120} closeDelay={120}>
-                          <HoverCardTrigger asChild>
-                            <button className="group relative">
-                              <div
-                                className={`absolute inset-0 rounded-full bg-gradient-to-br ${recipientThemes[index % recipientThemes.length]} opacity-50 blur-xl transition-opacity group-hover:opacity-90`}
-                              />
-                              <Avatar className="relative h-16 w-16 border border-white/60 shadow-[0_18px_45px_-25px_rgba(8,145,178,0.45)] dark:border-white/20 dark:shadow-[0_18px_45px_-25px_rgba(8,145,178,0.8)]">
-                                <AvatarFallback
-                                  className={`bg-gradient-to-br ${recipientThemes[index % recipientThemes.length]} text-base font-semibold text-white`}
-                                >
-                                  {getUserInitials(
-                                    recipient.collaboratorName,
-                                    recipient.collaboratorEmail,
-                                  )}
-                                </AvatarFallback>
-                              </Avatar>
-                            </button>
-                          </HoverCardTrigger>
-                          <HoverCardContent
-                            side="top"
-                            align="center"
-                            className="w-56 rounded-2xl border-border/70 bg-background/95 p-4 backdrop-blur"
-                          >
-                            <div className="flex items-center gap-3">
-                              <Avatar className="h-11 w-11 border border-border/60">
-                                <AvatarFallback
-                                  className={`bg-gradient-to-br ${recipientThemes[index % recipientThemes.length]} text-sm font-semibold text-white`}
-                                >
-                                  {getUserInitials(
-                                    recipient.collaboratorName,
-                                    recipient.collaboratorEmail,
-                                  )}
-                                </AvatarFallback>
-                              </Avatar>
-                              <div className="min-w-0">
-                                <p className="truncate text-sm font-semibold text-foreground">
-                                  {recipient.collaboratorName ||
-                                    (recipient.role === "owner"
-                                      ? "Owner"
-                                      : "Collaborator")}
-                                </p>
-                                <p className="truncate text-xs text-muted-foreground">
-                                  {recipient.collaboratorEmail || "No email available"}
-                                </p>
-                              </div>
-                            </div>
-                            <Badge
-                              variant="outline"
-                              className="rounded-full text-[10px] font-semibold uppercase tracking-[0.16em]"
+                  {sharedRecipients.length > 0 ? (
+                    <div className="relative h-full min-h-[16rem] mt-10">
+                      {sharedRecipients.slice(0, 6).map((recipient, index) => (
+                        <motion.div
+                          key={`${recipient.collaboratorClerkUserId}-${index}`}
+                          className={`absolute ${recipientOffsets[index % recipientOffsets.length]}`}
+                          animate={{
+                            y: [0, -10, 0],
+                            rotate: [0, index % 2 === 0 ? 2 : -2, 0],
+                          }}
+                          transition={{
+                            duration: 5.8 + index * 0.35,
+                            repeat: Infinity,
+                            repeatType: "mirror",
+                            ease: "easeInOut",
+                            delay: index * 0.18,
+                          }}
+                        >
+                          <ProfileHoverCard openDelay={120} closeDelay={120}>
+                            <HoverCardTrigger asChild>
+                              <button className="group relative">
+                                <div
+                                  className={`absolute inset-0 rounded-full bg-gradient-to-br ${recipientThemes[index % recipientThemes.length]} opacity-50 blur-xl transition-opacity group-hover:opacity-90`}
+                                />
+                                <Avatar className="relative h-16 w-16 border border-white/60 shadow-[0_18px_45px_-25px_rgba(8,145,178,0.45)] dark:border-white/20 dark:shadow-[0_18px_45px_-25px_rgba(8,145,178,0.8)]">
+                                  <AvatarFallback
+                                    className={`bg-gradient-to-br ${recipientThemes[index % recipientThemes.length]} text-base font-semibold text-white`}
+                                  >
+                                    {getUserInitials(
+                                      recipient.collaboratorName,
+                                      recipient.collaboratorEmail,
+                                    )}
+                                  </AvatarFallback>
+                                </Avatar>
+                              </button>
+                            </HoverCardTrigger>
+                            <HoverCardContent
+                              side="top"
+                              align="center"
+                              className="w-56 rounded-2xl border-border/70 bg-background/95 p-4 backdrop-blur"
                             >
-                              {recipient.role}
-                            </Badge>
-                          </HoverCardContent>
-                        </ProfileHoverCard>
-                      </motion.div>
-                    ))}
-                  </div>
-                ) : (
-                  <div className="flex min-h-[16rem] items-center justify-center px-8">
-                    <p className="max-w-xs text-center text-sm leading-7 text-slate-500 dark:text-slate-400">
-                      Active collaborators will appear here once teammates open
-                      the same shared translation space.
-                    </p>
-                  </div>
-                )}
-              </div>
-            </div>
-          </div>
-        </Reveal>
-
-        <section className="grid items-start gap-4">
-          <Reveal
-            delay={0.05}
-            className="glass-panel self-start rounded-[1.75rem] border border-border/70 p-5"
-          >
-            <div className="flex flex-col gap-4">
-              <div>
-                <p className="text-xs font-semibold uppercase tracking-[0.18em] text-muted-foreground">
-                  Review Controls
-                </p>
-                <p className="mt-2 text-sm leading-7 text-muted-foreground">
-                  Filter the queue, track progress, and take action on segments
-                  without leaving the page.
-                </p>
-                <p className="mt-2 text-xs text-muted-foreground">
-                  Role:{" "}
-                  <span className="font-semibold capitalize text-foreground">
-                    {currentRole}
-                  </span>
-                  {currentRole === "viewer"
-                    ? " - viewers can inspect shared progress but cannot edit or approve."
-                    : currentRole === "editor"
-                      ? " - editors can translate, edit, and approve segments."
-                      : " - owners can manage access and coordinate the workspace."}
-                </p>
-              </div>
-
-              <div className="w-full rounded-2xl border border-border/60 bg-background/75 p-4 md:max-w-sm">
-                <div className="flex items-center justify-between text-xs font-medium text-muted-foreground">
-                  <span>Completion</span>
-                  <span className="font-mono">
-                    {completedCount}/{segments.length}
-                  </span>
-                </div>
-                <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-muted">
-                  <div
-                    className="h-full rounded-full bg-gradient-to-r from-primary via-sky-400 to-cyan-400 transition-all duration-500"
-                    style={{ width: `${progress}%` }}
-                  />
+                              <div className="flex items-center gap-3">
+                                <Avatar className="h-11 w-11 border border-border/60">
+                                  <AvatarFallback
+                                    className={`bg-gradient-to-br ${recipientThemes[index % recipientThemes.length]} text-sm font-semibold text-white`}
+                                  >
+                                    {getUserInitials(
+                                      recipient.collaboratorName,
+                                      recipient.collaboratorEmail,
+                                    )}
+                                  </AvatarFallback>
+                                </Avatar>
+                                <div className="min-w-0">
+                                  <p className="truncate text-sm font-semibold text-foreground">
+                                    {recipient.collaboratorName ||
+                                      (recipient.role === "owner"
+                                        ? "Owner"
+                                        : "Collaborator")}
+                                  </p>
+                                  <p className="truncate text-xs text-muted-foreground">
+                                    {recipient.collaboratorEmail ||
+                                      "No email available"}
+                                  </p>
+                                </div>
+                              </div>
+                              <Badge
+                                variant="outline"
+                                className="rounded-full text-[10px] font-semibold uppercase tracking-[0.16em]"
+                              >
+                                {recipient.role}
+                              </Badge>
+                            </HoverCardContent>
+                          </ProfileHoverCard>
+                        </motion.div>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="flex min-h-[16rem] items-center justify-center px-8">
+                      <p className="max-w-xs text-center text-sm leading-7 text-slate-500 dark:text-slate-400">
+                        Active collaborators will appear here once teammates
+                        open the same shared translation space.
+                      </p>
+                    </div>
+                  )}
                 </div>
               </div>
             </div>
+          </Reveal>
 
-            <div className="mt-5 grid gap-4 lg:grid-cols-[minmax(0,1fr)_auto]">
-              <div className="grid grid-cols-2 gap-2 sm:flex sm:flex-wrap">
-                <Button
-                  variant="outline"
-                  className="h-10 rounded-full"
-                  onClick={() => void loadSegments(statusFilter)}
-                  disabled={loading}
-                >
-                  <RefreshCw
-                    className={cn("mr-2 h-4 w-4", loading && "animate-spin")}
-                  />
-                  Refresh
-                </Button>
-                <Button
-                  variant="outline"
-                  className="h-10 rounded-full"
-                  onClick={handleSelectAll}
-                  disabled={!canModifyWorkspace}
-                >
-                  {allSelected ? "Clear Selection" : "Select All"}
-                </Button>
-                <Button
-                  variant="outline"
-                  className="h-10 rounded-full"
-                  onClick={() => void handleClaimSelected()}
-                  disabled={!canModifyWorkspace || selectedIds.size === 0}
-                >
-                  Claim Selected
-                </Button>
-                {selectedApprovableCount > 0 && (
+          <section className="grid items-start gap-4">
+            <Reveal
+              delay={0.05}
+              className="glass-panel self-start rounded-[1.75rem] border border-border/70 p-5"
+            >
+              <div className="flex flex-col gap-4">
+                <div>
+                  <p className="text-xs font-semibold uppercase tracking-[0.18em] text-muted-foreground">
+                    Review Controls
+                  </p>
+                  <p className="mt-2 text-sm leading-7 text-muted-foreground">
+                    Filter the queue, track progress, and take action on
+                    segments without leaving the page.
+                  </p>
+                  <p className="mt-2 text-xs text-muted-foreground">
+                    Role:{" "}
+                    <span className="font-semibold capitalize text-foreground">
+                      {currentRole}
+                    </span>
+                    {currentRole === "viewer"
+                      ? " - viewers can inspect shared progress but cannot edit or approve."
+                      : currentRole === "editor"
+                        ? " - editors can translate, edit, and approve segments."
+                        : " - owners can manage access, coordinate the workspace, and approve segments."}
+                  </p>
+                </div>
+
+                <div className="w-full rounded-2xl border border-border/60 bg-background/75 p-4 md:max-w-sm">
+                  <div className="flex items-center justify-between text-xs font-medium text-muted-foreground">
+                    <span>Completion</span>
+                    <span className="font-mono">
+                      {completedCount}/{segments.length}
+                    </span>
+                  </div>
+                  <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-muted">
+                    <div
+                      className="h-full rounded-full bg-gradient-to-r from-primary via-sky-400 to-cyan-400 transition-all duration-500"
+                      style={{ width: `${progress}%` }}
+                    />
+                  </div>
+                </div>
+              </div>
+
+              <div className="mt-5 grid gap-4 lg:grid-cols-[minmax(0,1fr)_auto]">
+                <div className="grid grid-cols-2 gap-2 sm:flex sm:flex-wrap">
                   <Button
-                  variant="outline"
-                  className="h-10 rounded-full"
-                  onClick={() => void handleBulkApprove()}
-                  disabled={!canApproveSegments}
-                >
-                  <CheckCircle2 className="mr-2 h-4 w-4" />
-                  Bulk Accept ({selectedApprovableCount})
-                </Button>
-                )}
-                {currentRole === "owner" && assignableCollaborators.length ? (
-                  <div className="flex flex-wrap items-center gap-2">
-                    <Select
-                      value={selectedAssignee}
-                      onValueChange={setSelectedAssignee}
+                    variant="outline"
+                    className="h-10 rounded-full"
+                    onClick={() => void loadSegments(statusFilter)}
+                    disabled={loading}
+                  >
+                    <RefreshCw
+                      className={cn("mr-2 h-4 w-4", loading && "animate-spin")}
+                    />
+                    Refresh
+                  </Button>
+                  <Button
+                    variant="outline"
+                    className="h-10 rounded-full"
+                    onClick={handleSelectAll}
+                    disabled={!canModifyWorkspace}
+                  >
+                    {allSelected ? "Clear Selection" : "Select All"}
+                  </Button>
+                  <Button
+                    variant="outline"
+                    className="h-10 rounded-full"
+                    onClick={() => void handleClaimSelected()}
+                    disabled={!canModifyWorkspace || selectedIds.size === 0}
+                  >
+                    Claim Selected
+                  </Button>
+                  {selectedApprovableCount > 0 && (
+                    <Button
+                      variant="outline"
+                      className="h-10 rounded-full"
+                      onClick={() => void handleBulkApprove()}
+                      disabled={!canApproveSegments}
                     >
-                      <SelectTrigger className="h-10 min-w-[220px] rounded-full border-border/70 bg-background/90 text-sm">
-                        <SelectValue placeholder="Assign selected to..." />
+                      <CheckCircle2 className="mr-2 h-4 w-4" />
+                      Bulk Accept ({selectedApprovableCount})
+                    </Button>
+                  )}
+                  {currentRole === "owner" && assignableCollaborators.length ? (
+                    <div className="flex flex-wrap items-center gap-2">
+                      <Select
+                        value={selectedAssignee}
+                        onValueChange={setSelectedAssignee}
+                      >
+                        <SelectTrigger className="h-10 min-w-[220px] rounded-full border-border/70 bg-background/90 text-sm">
+                          <SelectValue placeholder="Assign selected to..." />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {assignableCollaborators.map((collaborator) => (
+                            <SelectItem
+                              key={collaborator.collaboratorClerkUserId}
+                              value={collaborator.collaboratorClerkUserId}
+                            >
+                              {(collaborator.collaboratorName ||
+                                collaborator.collaboratorEmail) +
+                                ` (${collaborator.role})`}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                      <Button
+                        variant="outline"
+                        className="h-10 rounded-full"
+                        onClick={() => void handleAssignSelected()}
+                        disabled={selectedIds.size === 0 || !selectedAssignee}
+                      >
+                        Assign Selected
+                      </Button>
+                    </div>
+                  ) : null}
+                  <Button
+                    variant="outline"
+                    className="h-10 rounded-full"
+                    onClick={() => void handleShare()}
+                    disabled={!docId}
+                  >
+                    <Copy className="mr-2 h-4 w-4" />
+                    Share
+                  </Button>
+                </div>
+
+                <div className="grid grid-cols-2 gap-2 sm:flex sm:flex-wrap sm:justify-end">
+                  {STATUS_FILTERS.map((filter) => {
+                    const count =
+                      filter === "all"
+                        ? segments.length
+                        : segments.filter(
+                            (segment) => segment.status === filter,
+                          ).length;
+                    const filterTone =
+                      filter === "approved"
+                        ? "border-emerald-300/80 text-emerald-700 hover:border-emerald-400 dark:border-emerald-800/80 dark:text-emerald-200 dark:hover:border-emerald-700"
+                        : filter === "reviewed"
+                          ? "border-amber-300/80 text-amber-700 hover:border-amber-400 dark:border-amber-800/80 dark:text-amber-200 dark:hover:border-amber-700"
+                          : filter === "pending"
+                            ? "border-slate-300/80 text-slate-700 hover:border-slate-400 dark:border-slate-700/80 dark:text-slate-200 dark:hover:border-slate-500"
+                            : "border-primary/35 text-primary hover:border-primary/50 dark:border-primary/40 dark:text-primary";
+                    return (
+                      <button
+                        key={filter}
+                        onClick={() => setStatusFilter(filter)}
+                        className={cn(
+                          "min-w-0 rounded-full border px-4 py-2 text-sm font-medium capitalize transition-all duration-200",
+                          statusFilter === filter
+                            ? "border-primary bg-primary text-primary-foreground shadow-lg shadow-sky-500/15"
+                            : cn("bg-background/70", filterTone),
+                        )}
+                      >
+                        {filter}
+                        {count > 0 && (
+                          <span className="ml-1 opacity-75">({count})</span>
+                        )}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              <div className="mt-4 grid gap-3 rounded-[1.5rem] border border-border/60 bg-background/75 p-4 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-end">
+                <div className="min-w-0">
+                  <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">
+                    Search Segments
+                  </p>
+                  <Input
+                    value={searchQuery}
+                    onChange={(event) => setSearchQuery(event.target.value)}
+                    placeholder="Search source or translated text..."
+                    className="mt-2 h-11 rounded-xl border-border/70 bg-background/90"
+                  />
+                </div>
+
+                <div className="grid grid-cols-3 gap-2">
+                  {(
+                    [
+                      { id: "cards", label: "Normal", icon: LayoutGrid },
+                      { id: "compact", label: "Compact", icon: List },
+                      { id: "table", label: "Table", icon: Table2 },
+                    ] as const
+                  ).map((view) => (
+                    <button
+                      key={view.id}
+                      onClick={() => setViewMode(view.id)}
+                      className={cn(
+                        "inline-flex h-11 items-center justify-center gap-2 rounded-xl border px-3 text-sm font-medium transition-colors",
+                        viewMode === view.id
+                          ? "border-primary bg-primary text-primary-foreground"
+                          : "border-border/70 bg-background/70 text-muted-foreground hover:border-primary/40 hover:text-foreground",
+                      )}
+                    >
+                      <view.icon className="h-4 w-4" />
+                      <span className="hidden sm:inline">{view.label}</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+                {[
+                  {
+                    label: "Review",
+                    value: `${progress}%`,
+                    note: `${completedCount}/${segments.length} completed`,
+                    borderColor: "border-primary",
+                  },
+                  {
+                    label: "Approved",
+                    value: `${approvedCount}`,
+                    note: "Finalized",
+                    borderColor: "border-emerald-300",
+                  },
+                  {
+                    label: "Pending",
+                    value: `${pendingCount}`,
+                    note: "Needs review",
+                    borderColor: "border-amber-300",
+                  },
+                  {
+                    label: "Attention",
+                    value: `${flaggedCount}`,
+                    note: "Errors or alerts",
+                    borderColor: "border-red-300",
+                  },
+                ].map((item, index) => (
+                  <HoverCard
+                    key={item.label}
+                    initial={{ opacity: 0, y: 18 }}
+                    whileInView={{ opacity: 1, y: 0 }}
+                    viewport={{ once: true, amount: 0.25 }}
+                    transition={{
+                      duration: 0.4,
+                      delay: index * 0.05,
+                      ease: [0.22, 1, 0.36, 1],
+                    }}
+                    className={`rounded-[1.25rem] border border-border/60 bg-background/78 p-3.5 shadow-[0_18px_40px_-34px_rgba(15,23,42,0.55)] ${item.borderColor}`}
+                  >
+                    <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-muted-foreground">
+                      {item.label}
+                    </p>
+                    <p className="mt-2 text-2xl font-semibold tracking-tight text-foreground">
+                      {item.value}
+                    </p>
+                    <p className="mt-1 text-xs text-muted-foreground">
+                      {item.note}
+                    </p>
+                  </HoverCard>
+                ))}
+              </div>
+
+              {translationMessage && !translating && (
+                <div
+                  className={cn(
+                    "mt-5 rounded-2xl border px-4 py-3 text-sm",
+                    translationMessage.includes("translated")
+                      ? "border-emerald-300/70 bg-emerald-100/80 text-emerald-800 dark:border-emerald-800/70 dark:bg-emerald-950/40 dark:text-emerald-200"
+                      : "border-border/70 bg-background/75 text-muted-foreground",
+                  )}
+                >
+                  {translationMessage}
+                </div>
+              )}
+
+              {translating && (
+                <div className="mt-5 rounded-[1.5rem] border border-primary/20 bg-primary/8 p-5">
+                  <div className="flex items-start gap-3">
+                    <Spinner className="mt-0.5 h-4 w-4 text-primary" />
+                    <div>
+                      <p className="text-sm font-medium text-foreground">
+                        Translating... this may take a moment for large
+                        documents.
+                      </p>
+                      <p className="mt-1 text-sm text-muted-foreground">
+                        {streamProgress.total > 0
+                          ? `${streamProgress.completed} of ${streamProgress.total} segments processed, ${streamProgress.translated} translated so far.`
+                          : "Keep this page open while the segments are translated and refreshed."}
+                      </p>
+                    </div>
+                  </div>
+                  <div className="mt-4 h-2.5 overflow-hidden rounded-full bg-primary/10">
+                    <div
+                      className="h-full rounded-full bg-gradient-to-r from-primary via-sky-400 to-cyan-400 transition-all duration-300"
+                      style={{
+                        width:
+                          streamProgress.total > 0
+                            ? `${Math.max(
+                                6,
+                                Math.round(
+                                  (streamProgress.completed /
+                                    streamProgress.total) *
+                                    100,
+                                ),
+                              )}%`
+                            : "20%",
+                      }}
+                    />
+                  </div>
+                </div>
+              )}
+
+              {currentRole != "viewer" && (
+                <div className="mt-5 grid gap-3 rounded-[1.5rem] border border-border/60 bg-background/75 p-4 xl:grid-cols-[minmax(0,0.9fr)_minmax(0,0.9fr)_auto] xl:items-end">
+                  <div className="min-w-0">
+                    <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">
+                      Target Language
+                    </p>
+                    <Select
+                      value={targetLang}
+                      onValueChange={setTargetLang}
+                      disabled={!canModifyWorkspace}
+                    >
+                      <SelectTrigger className="mt-2 h-11 rounded-xl border-border/70 bg-background/90 text-sm">
+                        <SelectValue />
                       </SelectTrigger>
                       <SelectContent>
-                        {assignableCollaborators.map((collaborator) => (
+                        {LANGUAGES.map((language) => (
                           <SelectItem
-                            key={collaborator.collaboratorClerkUserId}
-                            value={collaborator.collaboratorClerkUserId}
+                            key={language.value}
+                            value={language.value}
                           >
-                            {(collaborator.collaboratorName || collaborator.collaboratorEmail) +
-                              ` (${collaborator.role})`}
+                            {language.label}
                           </SelectItem>
                         ))}
                       </SelectContent>
                     </Select>
+                  </div>
+
+                  <div className="min-w-0">
+                    <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">
+                      Export Format
+                    </p>
+                    <Select
+                      value={exportFormat}
+                      onValueChange={(value) =>
+                        setExportFormat(value as ExportFormat)
+                      }
+                    >
+                      <SelectTrigger className="mt-2 h-11 rounded-xl border-border/70 bg-background/90 text-sm">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="same">Same as source</SelectItem>
+                        <SelectItem value="docx">
+                          Word document - better fidelity
+                        </SelectItem>
+                        <SelectItem value="pdf">PDF document</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+
+                  <div className="grid gap-2 sm:grid-cols-2 xl:w-auto xl:min-w-[14rem]">
+                    <Button
+                      className="h-11 rounded-2xl"
+                      onClick={() => void handleTranslate()}
+                      disabled={translating || !docId || !canModifyWorkspace}
+                    >
+                      {translating ? (
+                        <>
+                          <Spinner className="mr-2 h-4 w-4" />
+                          Translating...
+                        </>
+                      ) : (
+                        <>
+                          <Sparkles className="mr-2 h-4 w-4" />
+                          Translate
+                        </>
+                      )}
+                    </Button>
                     <Button
                       variant="outline"
-                      className="h-10 rounded-full"
-                      onClick={() => void handleAssignSelected()}
-                      disabled={selectedIds.size === 0 || !selectedAssignee}
+                      className="h-11 rounded-2xl"
+                      onClick={() => void handleExport()}
+                      disabled={
+                        exporting ||
+                        (!exportStatus?.ready_to_export &&
+                          currentRole !== "owner")
+                      }
                     >
-                      Assign Selected
+                      {exporting ? <Spinner className="mr-2 h-4 w-4" /> : null}
+                      Export
                     </Button>
                   </div>
-                ) : null}
-                <Button
-                  variant="outline"
-                  className="h-10 rounded-full"
-                  onClick={() => void handleShare()}
-                  disabled={!docId}
-                >
-                  <Copy className="mr-2 h-4 w-4" />
-                  Share
-                </Button>
-              </div>
+                </div>
+              )}
+            </Reveal>
+          </section>
 
-              <div className="grid grid-cols-2 gap-2 sm:flex sm:flex-wrap sm:justify-end">
-                {STATUS_FILTERS.map((filter) => {
-                  const count =
-                    filter === "all"
-                      ? segments.length
-                      : segments.filter((segment) => segment.status === filter)
-                          .length;
-                  const filterTone =
-                    filter === "approved"
-                      ? "border-emerald-300/80 text-emerald-700 hover:border-emerald-400 dark:border-emerald-800/80 dark:text-emerald-200 dark:hover:border-emerald-700"
-                      : filter === "reviewed"
-                        ? "border-amber-300/80 text-amber-700 hover:border-amber-400 dark:border-amber-800/80 dark:text-amber-200 dark:hover:border-amber-700"
-                        : filter === "pending"
-                          ? "border-slate-300/80 text-slate-700 hover:border-slate-400 dark:border-slate-700/80 dark:text-slate-200 dark:hover:border-slate-500"
-                          : "border-primary/35 text-primary hover:border-primary/50 dark:border-primary/40 dark:text-primary";
-                  return (
-                    <button
-                      key={filter}
-                      onClick={() => setStatusFilter(filter)}
-                      className={cn(
-                        "min-w-0 rounded-full border px-4 py-2 text-sm font-medium capitalize transition-all duration-200",
-                        statusFilter === filter
-                          ? "border-primary bg-primary text-primary-foreground shadow-lg shadow-sky-500/15"
-                          : cn(
-                              "bg-background/70",
-                              filterTone,
-                            ),
-                      )}
-                    >
-                      {filter}
-                      {count > 0 && (
-                        <span className="ml-1 opacity-75">({count})</span>
-                      )}
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-
-            <div className="mt-4 grid gap-3 rounded-[1.5rem] border border-border/60 bg-background/75 p-4 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-end">
-              <div className="min-w-0">
-                <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">
-                  Search Segments
-                </p>
-                <Input
-                  value={searchQuery}
-                  onChange={(event) => setSearchQuery(event.target.value)}
-                  placeholder="Search source or translated text..."
-                  className="mt-2 h-11 rounded-xl border-border/70 bg-background/90"
-                />
-              </div>
-
-              <div className="grid grid-cols-3 gap-2">
-                {(
-                  [
-                    { id: "cards", label: "Normal", icon: LayoutGrid },
-                    { id: "compact", label: "Compact", icon: List },
-                    { id: "table", label: "Table", icon: Table2 },
-                  ] as const
-                ).map((view) => (
-                  <button
-                    key={view.id}
-                    onClick={() => setViewMode(view.id)}
-                    className={cn(
-                      "inline-flex h-11 items-center justify-center gap-2 rounded-xl border px-3 text-sm font-medium transition-colors",
-                      viewMode === view.id
-                        ? "border-primary bg-primary text-primary-foreground"
-                        : "border-border/70 bg-background/70 text-muted-foreground hover:border-primary/40 hover:text-foreground",
-                    )}
-                  >
-                    <view.icon className="h-4 w-4" />
-                    <span className="hidden sm:inline">{view.label}</span>
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-              {[
-                {
-                  label: "Review",
-                  value: `${progress}%`,
-                  note: `${completedCount}/${segments.length} completed`,
-                  borderColor: "border-primary",
-                },
-                {
-                  label: "Approved",
-                  value: `${approvedCount}`,
-                  note: "Finalized",
-                  borderColor: "border-emerald-300",
-                },
-                {
-                  label: "Pending",
-                  value: `${pendingCount}`,
-                  note: "Needs review",
-                  borderColor: "border-amber-300",
-                },
-                {
-                  label: "Attention",
-                  value: `${flaggedCount}`,
-                  note: "Errors or alerts",
-                  borderColor: "border-red-300",
-                },
-              ].map((item, index) => (
-                <HoverCard
-                  key={item.label}
-                  initial={{ opacity: 0, y: 18 }}
-                  whileInView={{ opacity: 1, y: 0 }}
-                  viewport={{ once: true, amount: 0.25 }}
-                  transition={{
-                    duration: 0.4,
-                    delay: index * 0.05,
-                    ease: [0.22, 1, 0.36, 1],
-                  }}
-                  className={`rounded-[1.25rem] border border-border/60 bg-background/78 p-3.5 shadow-[0_18px_40px_-34px_rgba(15,23,42,0.55)] ${item.borderColor}`}
-                >
-                  <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-muted-foreground">
-                    {item.label}
-                  </p>
-                  <p className="mt-2 text-2xl font-semibold tracking-tight text-foreground">
-                    {item.value}
-                  </p>
-                  <p className="mt-1 text-xs text-muted-foreground">
-                    {item.note}
-                  </p>
-                </HoverCard>
-              ))}
-            </div>
-
-            {translationMessage && !translating && (
-              <div
-                className={cn(
-                  "mt-5 rounded-2xl border px-4 py-3 text-sm",
-                  translationMessage.includes("translated")
-                    ? "border-emerald-300/70 bg-emerald-100/80 text-emerald-800 dark:border-emerald-800/70 dark:bg-emerald-950/40 dark:text-emerald-200"
-                    : "border-border/70 bg-background/75 text-muted-foreground",
-                )}
-              >
-                {translationMessage}
+          {exportStatus &&
+            (exportStatus.pending > 0 ||
+              exportStatus.translation_errors > 0 ||
+              exportStatus.warning) && (
+              <div className="rounded-2xl border border-amber-300/60 bg-amber-100/75 px-5 py-4 text-sm text-amber-800 dark:border-amber-800/60 dark:bg-amber-950/35 dark:text-amber-200">
+                {exportStatus.warning ??
+                  `${exportStatus.pending} pending segment${exportStatus.pending === 1 ? "" : "s"} and ${exportStatus.translation_errors} translation error${exportStatus.translation_errors === 1 ? "" : "s"} still need attention before export.`}
               </div>
             )}
 
-            {translating && (
-              <div className="mt-5 rounded-[1.5rem] border border-primary/20 bg-primary/8 p-5">
-                <div className="flex items-start gap-3">
-                  <Spinner className="mt-0.5 h-4 w-4 text-primary" />
-                  <div>
-                    <p className="text-sm font-medium text-foreground">
-                      Translating... this may take a moment for large documents.
-                    </p>
-                    <p className="mt-1 text-sm text-muted-foreground">
-                      {streamProgress.total > 0
-                        ? `${streamProgress.completed} of ${streamProgress.total} segments processed, ${streamProgress.translated} translated so far.`
-                        : "Keep this page open while the segments are translated and refreshed."}
-                    </p>
-                  </div>
-                </div>
-                <div className="mt-4 h-2.5 overflow-hidden rounded-full bg-primary/10">
-                  <div
-                    className="h-full rounded-full bg-gradient-to-r from-primary via-sky-400 to-cyan-400 transition-all duration-300"
-                    style={{
-                      width:
-                        streamProgress.total > 0
-                          ? `${Math.max(
-                              6,
-                              Math.round(
-                                (streamProgress.completed / streamProgress.total) *
-                                  100,
-                              ),
-                            )}%`
-                          : "20%",
-                    }}
-                  />
-                </div>
-              </div>
-            )}
-
-            { currentRole != "viewer" && <div className="mt-5 grid gap-3 rounded-[1.5rem] border border-border/60 bg-background/75 p-4 xl:grid-cols-[minmax(0,0.9fr)_minmax(0,0.9fr)_auto] xl:items-end">
-              <div className="min-w-0">
-                <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">
-                  Target Language
-                </p>
-                <Select
-                  value={targetLang}
-                  onValueChange={setTargetLang}
-                  disabled={!canModifyWorkspace}
-                >
-                  <SelectTrigger className="mt-2 h-11 rounded-xl border-border/70 bg-background/90 text-sm">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {LANGUAGES.map((language) => (
-                      <SelectItem key={language.value} value={language.value}>
-                        {language.label}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
-
-              <div className="min-w-0">
-                <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">
-                  Export Format
-                </p>
-                <Select
-                  value={exportFormat}
-                  onValueChange={(value) =>
-                    setExportFormat(value as ExportFormat)
-                  }
-                >
-                  <SelectTrigger className="mt-2 h-11 rounded-xl border-border/70 bg-background/90 text-sm">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="same">Same as source</SelectItem>
-                    <SelectItem value="docx">
-                      Word document - better fidelity
-                    </SelectItem>
-                    <SelectItem value="pdf">PDF document</SelectItem>
-                  </SelectContent>
-                </Select>
-              </div>
-
-              <div className="grid gap-2 sm:grid-cols-2 xl:w-auto xl:min-w-[14rem]">
-                <Button
-                  className="h-11 rounded-2xl"
-                  onClick={() => void handleTranslate()}
-                  disabled={translating || !docId || !canModifyWorkspace}
-                >
-                  {translating ? (
-                    <>
-                      <Spinner className="mr-2 h-4 w-4" />
-                      Translating...
-                    </>
-                  ) : (
-                    <>
-                      <Sparkles className="mr-2 h-4 w-4" />
-                      Translate
-                    </>
-                  )}
-                </Button>
-                <Button
-                  variant="outline"
-                  className="h-11 rounded-2xl"
-                  onClick={() => void handleExport()}
-                  disabled={exporting || !exportStatus?.ready_to_export}
-                >
-                  {exporting ? <Spinner className="mr-2 h-4 w-4" /> : null}
-                  Export
-                </Button>
-              </div>
-            </div>}
-          </Reveal>
-        </section>
-
-        {exportStatus &&
-          (exportStatus.pending > 0 ||
-            exportStatus.translation_errors > 0 ||
-            exportStatus.warning) && (
-            <div className="rounded-2xl border border-amber-300/60 bg-amber-100/75 px-5 py-4 text-sm text-amber-800 dark:border-amber-800/60 dark:bg-amber-950/35 dark:text-amber-200">
-              {exportStatus.warning ??
-                `${exportStatus.pending} pending segment${exportStatus.pending === 1 ? "" : "s"} and ${exportStatus.translation_errors} translation error${exportStatus.translation_errors === 1 ? "" : "s"} still need attention before export.`}
-            </div>
+          {segments.some(
+            (segment) =>
+              segment.glossary_violations &&
+              segment.glossary_violations.length > 0,
+          ) && (
+            <Reveal className="glass-panel flex items-center gap-3 rounded-[1.5rem] border border-amber-300/60 bg-amber-100/75 px-5 py-4 dark:border-amber-800/60 dark:bg-amber-950/35">
+              <AlertTriangle className="h-4 w-4 shrink-0 text-amber-700 dark:text-amber-300" />
+              <p className="text-sm text-amber-800 dark:text-amber-200">
+                Some segments contain glossary term violations. They are
+                highlighted inline for faster review.
+              </p>
+            </Reveal>
           )}
 
-        {segments.some(
-          (segment) =>
-            segment.glossary_violations &&
-            segment.glossary_violations.length > 0,
-        ) && (
-          <Reveal className="glass-panel flex items-center gap-3 rounded-[1.5rem] border border-amber-300/60 bg-amber-100/75 px-5 py-4 dark:border-amber-800/60 dark:bg-amber-950/35">
-            <AlertTriangle className="h-4 w-4 shrink-0 text-amber-700 dark:text-amber-300" />
-            <p className="text-sm text-amber-800 dark:text-amber-200">
-              Some segments contain glossary term violations. They are
-              highlighted inline for faster review.
-            </p>
-          </Reveal>
-        )}
-
-        {loading ? (
-          <div className="glass-panel motion-fade-in flex flex-col items-center gap-4 rounded-[2rem] py-24">
-            <Spinner className="h-8 w-8 text-primary" />
-            <p className="text-sm text-muted-foreground">Loading segments...</p>
-          </div>
-        ) : segments.length === 0 ? (
-          <div className="glass-panel flex flex-col items-center gap-3 rounded-[2rem] py-20 text-center">
-            <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-muted">
-              <Languages className="h-6 w-6 text-muted-foreground" />
+          {loading ? (
+            <div className="glass-panel motion-fade-in flex flex-col items-center gap-4 rounded-[2rem] py-24">
+              <Spinner className="h-8 w-8 text-primary" />
+              <p className="text-sm text-muted-foreground">
+                Loading segments...
+              </p>
             </div>
-            <p className="text-lg font-semibold text-foreground">
-              No segments found
-            </p>
-            <p className="max-w-md text-sm leading-7 text-muted-foreground">
-              Try another filter or run translation to populate this document
-              with segments.
-            </p>
-          </div>
-        ) : filteredSegments.length === 0 ? (
-          <div className="glass-panel flex flex-col items-center gap-3 rounded-[2rem] py-20 text-center">
-            <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-muted">
-              <Languages className="h-6 w-6 text-muted-foreground" />
-            </div>
-            <p className="text-lg font-semibold text-foreground">
-              No matching segments
-            </p>
-            <p className="max-w-md text-sm leading-7 text-muted-foreground">
-              Try a different search term or change the current status filter.
-            </p>
-          </div>
-        ) : (
-          <>
-            {viewMode === "cards" ? (
-              <motion.section layout className="space-y-4 overflow-hidden">
-                <AnimatePresence mode="popLayout">
-                  {visibleSegments.map((segment, index) => (
-                    <SegmentRow
-                      key={`${segment.segment_id}-${index}`}
-                      segment={segment}
-                      selected={selectedIds.has(segment.segment_id)}
-                      onSelect={toggleSelect}
-                      onApprove={handleApprove}
-                      onUpdateOutput={handleUpdateOutput}
-                      onUpdateSource={handleUpdateSource}
-                      onRetry={handleRetry}
-                      onStartEdit={beginSegmentEdit}
-                      onFinishEdit={finishSegmentEdit}
-                      retrying={retryingId === segment.segment_id}
-                      canModifyWorkspace={canModifyWorkspace}
-                      canApproveSegments={canApproveSegments}
-                      currentUserId={userId}
-                      canOperateSegment={canOperateSegment(segment)}
-                      canApproveSegment={canApproveSegment(segment)}
-                    />
-                  ))}
-                </AnimatePresence>
-                {hasMoreSegments ? (
-                  <div
-                    ref={loadMoreRef}
-                    className="glass-panel flex items-center justify-between rounded-[1.4rem] border border-dashed border-border/70 px-4 py-3 text-sm text-muted-foreground"
-                  >
-                    <span>
-                      Rendering {visibleSegments.length} of{" "}
-                      {filteredSegments.length} segments
-                    </span>
-                    <Spinner className="h-4 w-4 text-primary" />
-                  </div>
-                ) : null}
-              </motion.section>
-            ) : viewMode === "compact" ? (
-              <div className="glass-panel overflow-hidden rounded-[1.75rem] border border-border/70">
-                <div className="divide-y divide-border/60">
-                  {visibleSegments.map((segment) => (
-                    <div
-                      key={segment.segment_id}
-                      className="flex flex-col gap-3 px-4 py-4 lg:flex-row lg:items-start lg:justify-between"
-                    >
-                      <div className="min-w-0 flex-1">
-                        <div className="flex flex-wrap items-center gap-2">
-                          <input
-                            type="checkbox"
-                            checked={selectedIds.has(segment.segment_id)}
-                            onChange={() => toggleSelect(segment.segment_id)}
-                            disabled={segment.status === "approved" || !canModifyWorkspace}
-                            className="h-4 w-4 rounded accent-primary"
-                          />
-                          <p className="text-xs font-semibold uppercase tracking-[0.18em] text-muted-foreground">
-                            {segment.segment_id}
-                          </p>
-                          <StatusPill status={segment.status} />
-                          <TmMatchBadge tmMatchType={segment.tm_match_type} />
-                        </div>
-                        {inlineEditState?.segmentId === segment.segment_id &&
-                        inlineEditState.field === "source" ? (
-                          <div className="mt-3 space-y-2">
-                            <Textarea
-                              value={inlineEditState.value}
-                              onChange={(event) =>
-                                setInlineEditState((current) =>
-                                  current
-                                    ? { ...current, value: event.target.value }
-                                    : current,
-                                )
-                              }
-                              className="min-h-28 rounded-2xl border-border/70 bg-background/90 text-sm leading-7"
-                              autoFocus
-                            />
-                            <div className="flex gap-2">
-                              <Button
-                                size="sm"
-                                className="rounded-xl"
-                                onClick={handleSaveInlineEdit}
-                              >
-                                Save
-                              </Button>
-                              <Button
-                                size="sm"
-                                variant="outline"
-                                className="rounded-xl"
-                                onClick={handleCancelInlineEdit}
-                              >
-                                Cancel
-                              </Button>
-                            </div>
-                          </div>
-                        ) : (
-                          <p
-                            onDoubleClick={() =>
-                              handleOpenInlineEdit(segment, "source")
-                            }
-                            className={cn(
-                              "mt-3 line-clamp-2 text-sm leading-7 text-foreground",
-                              segment.status !== "approved" &&
-                                canOperateSegment(segment) &&
-                                "cursor-text rounded-xl transition-colors hover:bg-muted/35 hover:px-2 hover:py-1",
-                            )}
-                          >
-                            {segment.source_text}
-                          </p>
-                        )}
-                        {inlineEditState?.segmentId === segment.segment_id &&
-                        inlineEditState.field === "output" ? (
-                          <div className="mt-2 space-y-2">
-                            <Textarea
-                              value={inlineEditState.value}
-                              onChange={(event) =>
-                                setInlineEditState((current) =>
-                                  current
-                                    ? { ...current, value: event.target.value }
-                                    : current,
-                                )
-                              }
-                              className="min-h-28 rounded-2xl border-border/70 bg-background/90 text-sm leading-7"
-                              autoFocus
-                            />
-                            <div className="flex gap-2">
-                              <Button
-                                size="sm"
-                                className="rounded-xl"
-                                onClick={handleSaveInlineEdit}
-                              >
-                                Save
-                              </Button>
-                              <Button
-                                size="sm"
-                                variant="outline"
-                                className="rounded-xl"
-                                onClick={handleCancelInlineEdit}
-                              >
-                                Cancel
-                              </Button>
-                            </div>
-                          </div>
-                        ) : (
-                          <p
-                            onDoubleClick={() =>
-                              handleOpenInlineEdit(segment, "output")
-                            }
-                            className={cn(
-                              "mt-2 line-clamp-2 text-sm leading-7 text-muted-foreground",
-                              segment.status !== "approved" &&
-                                canOperateSegment(segment) &&
-                                "cursor-text rounded-xl transition-colors hover:bg-muted/35 hover:px-2 hover:py-1",
-                            )}
-                          >
-                            {getSegmentOutputText(segment) ||
-                              "Not yet translated"}
-                          </p>
-                        )}
-                      </div>
-                      {segment.status !== "approved" ? (
-                        <div className="flex flex-wrap gap-2 lg:justify-end">
-                          <Button
-                            size="icon-sm"
-                            variant="outline"
-                            className="rounded-xl border-amber-300/80 text-amber-700 hover:bg-amber-100/80 dark:border-amber-900/70 dark:text-amber-200 dark:hover:bg-amber-950/50"
-                            onClick={() => void handleRetry(segment)}
-                            disabled={retryingId === segment.segment_id || !canOperateSegment(segment)}
-                            title="Retranslate segment"
-                            aria-label={`Retranslate segment ${segment.segment_id}`}
-                          >
-                            {retryingId === segment.segment_id ? (
-                              <Spinner className="h-3.5 w-3.5" />
-                            ) : (
-                              <RotateCcw className="h-3.5 w-3.5" />
-                            )}
-                          </Button>
-                          {hasTranslatedOutput(segment) ? (
-                            <Button
-                              size="icon-sm"
-                              variant="outline"
-                              className="rounded-xl border-emerald-300/80 text-emerald-700 hover:bg-emerald-100/80 dark:border-emerald-900/70 dark:text-emerald-200 dark:hover:bg-emerald-950/50"
-                              onClick={() =>
-                                void handleApprove(
-                                  segment,
-                                  getSegmentOutputText(segment),
-                                )
-                              }
-                              disabled={!canApproveSegment(segment)}
-                              title="Approve translation"
-                              aria-label={`Approve segment ${segment.segment_id}`}
-                            >
-                              <Check className="h-3.5 w-3.5" />
-                            </Button>
-                          ) : null}
-                        </div>
-                      ) : (
-                        <div className="flex items-start lg:justify-end">
-                          <Badge
-                            variant="outline"
-                            className="rounded-full border-emerald-300/80 bg-emerald-100/80 text-[10px] font-semibold uppercase tracking-[0.16em] text-emerald-800 dark:border-emerald-800/80 dark:bg-emerald-950/45 dark:text-emerald-200"
-                          >
-                            Locked
-                          </Badge>
-                        </div>
-                      )}
-                    </div>
-                  ))}
-                </div>
+          ) : segments.length === 0 ? (
+            <div className="glass-panel flex flex-col items-center gap-3 rounded-[2rem] py-20 text-center">
+              <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-muted">
+                <Languages className="h-6 w-6 text-muted-foreground" />
               </div>
-            ) : (
-              <div className="glass-panel overflow-hidden rounded-2xl border border-border/70">
-                <Table>
-                  <TableHeader>
-                    <TableRow>
-                      <TableHead className="w-[64px]">Select</TableHead>
-                      <TableHead>Status</TableHead>
-                      <TableHead>Source</TableHead>
-                      <TableHead>Output</TableHead>
-                      <TableHead className="w-[180px]">Actions</TableHead>
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
+              <p className="text-lg font-semibold text-foreground">
+                No segments found
+              </p>
+              <p className="max-w-md text-sm leading-7 text-muted-foreground">
+                Try another filter or run translation to populate this document
+                with segments.
+              </p>
+            </div>
+          ) : filteredSegments.length === 0 ? (
+            <div className="glass-panel flex flex-col items-center gap-3 rounded-[2rem] py-20 text-center">
+              <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-muted">
+                <Languages className="h-6 w-6 text-muted-foreground" />
+              </div>
+              <p className="text-lg font-semibold text-foreground">
+                No matching segments
+              </p>
+              <p className="max-w-md text-sm leading-7 text-muted-foreground">
+                Try a different search term or change the current status filter.
+              </p>
+            </div>
+          ) : (
+            <>
+              {viewMode === "cards" ? (
+                <motion.section layout className="space-y-4 overflow-hidden">
+                  <AnimatePresence mode="popLayout">
+                    {visibleSegments.map((segment, index) => (
+                      <SegmentRow
+                        key={`${segment.segment_id}-${index}`}
+                        segment={segment}
+                        selected={selectedIds.has(segment.segment_id)}
+                        onSelect={toggleSelect}
+                        onApprove={handleApprove}
+                        onUpdateOutput={handleUpdateOutput}
+                        onUpdateSource={handleUpdateSource}
+                        onRetry={handleRetry}
+                        onStartEdit={beginSegmentEdit}
+                        onFinishEdit={finishSegmentEdit}
+                        retrying={retryingId === segment.segment_id}
+                        canModifyWorkspace={canModifyWorkspace}
+                        canApproveSegments={canApproveSegments}
+                        currentUserId={userId}
+                        canOperateSegment={canOperateSegment(segment)}
+                        canApproveSegment={canApproveSegment(segment)}
+                      />
+                    ))}
+                  </AnimatePresence>
+                  {hasMoreSegments ? (
+                    <div
+                      ref={loadMoreRef}
+                      className="glass-panel flex items-center justify-between rounded-[1.4rem] border border-dashed border-border/70 px-4 py-3 text-sm text-muted-foreground"
+                    >
+                      <span>
+                        Rendering {visibleSegments.length} of{" "}
+                        {filteredSegments.length} segments
+                      </span>
+                      <Spinner className="h-4 w-4 text-primary" />
+                    </div>
+                  ) : null}
+                </motion.section>
+              ) : viewMode === "compact" ? (
+                <div className="glass-panel overflow-hidden rounded-[1.75rem] border border-border/70">
+                  <div className="divide-y divide-border/60">
                     {visibleSegments.map((segment) => (
-                      <TableRow key={segment.segment_id}>
-                        <TableCell>
-                          <input
-                            type="checkbox"
-                            checked={selectedIds.has(segment.segment_id)}
-                            onChange={() => toggleSelect(segment.segment_id)}
-                            disabled={segment.status === "approved" || !canModifyWorkspace}
-                            className="h-4 w-4 rounded accent-primary"
-                          />
-                        </TableCell>
-                        <TableCell>
-                          <div className="flex flex-wrap gap-2">
+                      <div
+                        key={segment.segment_id}
+                        className="flex flex-col gap-3 px-4 py-4 lg:flex-row lg:items-start lg:justify-between"
+                      >
+                        <div className="min-w-0 flex-1">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <input
+                              type="checkbox"
+                              checked={selectedIds.has(segment.segment_id)}
+                              onChange={() => toggleSelect(segment.segment_id)}
+                              disabled={
+                                segment.status === "approved" ||
+                                !canModifyWorkspace
+                              }
+                              className="h-4 w-4 rounded accent-primary"
+                            />
+                            <p className="text-xs font-semibold uppercase tracking-[0.18em] text-muted-foreground">
+                              {segment.segment_id}
+                            </p>
                             <StatusPill status={segment.status} />
                             <TmMatchBadge tmMatchType={segment.tm_match_type} />
                           </div>
-                        </TableCell>
-                        <TableCell className="max-w-[360px] whitespace-normal">
                           {inlineEditState?.segmentId === segment.segment_id &&
                           inlineEditState.field === "source" ? (
-                            <div className="space-y-2">
+                            <div className="mt-3 space-y-2">
                               <Textarea
                                 value={inlineEditState.value}
                                 onChange={(event) =>
                                   setInlineEditState((current) =>
                                     current
-                                      ? { ...current, value: event.target.value }
+                                      ? {
+                                          ...current,
+                                          value: event.target.value,
+                                        }
                                       : current,
                                   )
                                 }
-                                className="min-h-24 rounded-2xl border-border/70 bg-background/90 text-sm leading-7"
+                                className="min-h-28 rounded-2xl border-border/70 bg-background/90 text-sm leading-7"
                                 autoFocus
                               />
                               <div className="flex gap-2">
@@ -2539,7 +2406,7 @@ function TranslatePageContent() {
                                 handleOpenInlineEdit(segment, "source")
                               }
                               className={cn(
-                                "line-clamp-3 text-sm leading-7 text-foreground",
+                                "mt-3 line-clamp-2 text-sm leading-7 text-foreground",
                                 segment.status !== "approved" &&
                                   canOperateSegment(segment) &&
                                   "cursor-text rounded-xl transition-colors hover:bg-muted/35 hover:px-2 hover:py-1",
@@ -2548,21 +2415,22 @@ function TranslatePageContent() {
                               {segment.source_text}
                             </p>
                           )}
-                        </TableCell>
-                        <TableCell className="max-w-[360px] whitespace-normal">
                           {inlineEditState?.segmentId === segment.segment_id &&
                           inlineEditState.field === "output" ? (
-                            <div className="space-y-2">
+                            <div className="mt-2 space-y-2">
                               <Textarea
                                 value={inlineEditState.value}
                                 onChange={(event) =>
                                   setInlineEditState((current) =>
                                     current
-                                      ? { ...current, value: event.target.value }
+                                      ? {
+                                          ...current,
+                                          value: event.target.value,
+                                        }
                                       : current,
                                   )
                                 }
-                                className="min-h-24 rounded-2xl border-border/70 bg-background/90 text-sm leading-7"
+                                className="min-h-28 rounded-2xl border-border/70 bg-background/90 text-sm leading-7"
                                 autoFocus
                               />
                               <div className="flex gap-2">
@@ -2589,7 +2457,7 @@ function TranslatePageContent() {
                                 handleOpenInlineEdit(segment, "output")
                               }
                               className={cn(
-                                "line-clamp-3 text-sm leading-7 text-muted-foreground",
+                                "mt-2 line-clamp-2 text-sm leading-7 text-muted-foreground",
                                 segment.status !== "approved" &&
                                   canOperateSegment(segment) &&
                                   "cursor-text rounded-xl transition-colors hover:bg-muted/35 hover:px-2 hover:py-1",
@@ -2599,121 +2467,321 @@ function TranslatePageContent() {
                                 "Not yet translated"}
                             </p>
                           )}
-                        </TableCell>
-                        <TableCell>
-                          {segment.status !== "approved" ? (
-                            <div className="flex flex-wrap gap-2">
+                        </div>
+                        {segment.status !== "approved" ? (
+                          <div className="flex flex-wrap gap-2 lg:justify-end">
+                            <Button
+                              size="icon-sm"
+                              variant="outline"
+                              className="rounded-xl border-amber-300/80 text-amber-700 hover:bg-amber-100/80 dark:border-amber-900/70 dark:text-amber-200 dark:hover:bg-amber-950/50"
+                              onClick={() => void handleRetry(segment)}
+                              disabled={
+                                retryingId === segment.segment_id ||
+                                !canOperateSegment(segment)
+                              }
+                              title="Retranslate segment"
+                              aria-label={`Retranslate segment ${segment.segment_id}`}
+                            >
+                              {retryingId === segment.segment_id ? (
+                                <Spinner className="h-3.5 w-3.5" />
+                              ) : (
+                                <RotateCcw className="h-3.5 w-3.5" />
+                              )}
+                            </Button>
+                            {hasTranslatedOutput(segment) ? (
                               <Button
                                 size="icon-sm"
                                 variant="outline"
-                                className="rounded-xl border-amber-300/80 text-amber-700 hover:bg-amber-100/80 dark:border-amber-900/70 dark:text-amber-200 dark:hover:bg-amber-950/50"
-                                onClick={() => void handleRetry(segment)}
-                                disabled={retryingId === segment.segment_id || !canOperateSegment(segment)}
-                                title="Retranslate segment"
-                                aria-label={`Retranslate segment ${segment.segment_id}`}
+                                className="rounded-xl border-emerald-300/80 text-emerald-700 hover:bg-emerald-100/80 dark:border-emerald-900/70 dark:text-emerald-200 dark:hover:bg-emerald-950/50"
+                                onClick={() =>
+                                  void handleApprove(
+                                    segment,
+                                    getSegmentOutputText(segment),
+                                  )
+                                }
+                                disabled={!canApproveSegment(segment)}
+                                title="Approve translation"
+                                aria-label={`Approve segment ${segment.segment_id}`}
                               >
-                                {retryingId === segment.segment_id ? (
-                                  <Spinner className="h-3.5 w-3.5" />
-                                ) : (
-                                  <RotateCcw className="h-3.5 w-3.5" />
-                                )}
+                                <Check className="h-3.5 w-3.5" />
                               </Button>
-                              {hasTranslatedOutput(segment) ? (
-                                <Button
-                                  size="icon-sm"
-                                  variant="outline"
-                                  className="rounded-xl border-emerald-300/80 text-emerald-700 hover:bg-emerald-100/80 dark:border-emerald-900/70 dark:text-emerald-200 dark:hover:bg-emerald-950/50"
-                                  onClick={() =>
-                                    void handleApprove(
-                                      segment,
-                                      getSegmentOutputText(segment),
-                                    )
-                                  }
-                                  disabled={!canApproveSegment(segment)}
-                                  title="Approve translation"
-                                  aria-label={`Approve segment ${segment.segment_id}`}
-                                >
-                                  <Check className="h-3.5 w-3.5" />
-                                </Button>
-                              ) : null}
-                            </div>
-                          ) : (
+                            ) : null}
+                          </div>
+                        ) : (
+                          <div className="flex items-start lg:justify-end">
                             <Badge
                               variant="outline"
                               className="rounded-full border-emerald-300/80 bg-emerald-100/80 text-[10px] font-semibold uppercase tracking-[0.16em] text-emerald-800 dark:border-emerald-800/80 dark:bg-emerald-950/45 dark:text-emerald-200"
                             >
                               Locked
                             </Badge>
-                          )}
-                        </TableCell>
-                      </TableRow>
+                          </div>
+                        )}
+                      </div>
                     ))}
-                  </TableBody>
-                </Table>
-              </div>
-            )}
+                  </div>
+                </div>
+              ) : (
+                <div className="glass-panel overflow-hidden rounded-2xl border border-border/70">
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead className="w-[64px]">Select</TableHead>
+                        <TableHead>Status</TableHead>
+                        <TableHead>Source</TableHead>
+                        <TableHead>Output</TableHead>
+                        <TableHead className="w-[180px]">Actions</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {visibleSegments.map((segment) => (
+                        <TableRow key={segment.segment_id}>
+                          <TableCell>
+                            <input
+                              type="checkbox"
+                              checked={selectedIds.has(segment.segment_id)}
+                              onChange={() => toggleSelect(segment.segment_id)}
+                              disabled={
+                                segment.status === "approved" ||
+                                !canModifyWorkspace
+                              }
+                              className="h-4 w-4 rounded accent-primary"
+                            />
+                          </TableCell>
+                          <TableCell>
+                            <div className="flex flex-wrap gap-2">
+                              <StatusPill status={segment.status} />
+                              <TmMatchBadge
+                                tmMatchType={segment.tm_match_type}
+                              />
+                            </div>
+                          </TableCell>
+                          <TableCell className="max-w-[360px] whitespace-normal">
+                            {inlineEditState?.segmentId ===
+                              segment.segment_id &&
+                            inlineEditState.field === "source" ? (
+                              <div className="space-y-2">
+                                <Textarea
+                                  value={inlineEditState.value}
+                                  onChange={(event) =>
+                                    setInlineEditState((current) =>
+                                      current
+                                        ? {
+                                            ...current,
+                                            value: event.target.value,
+                                          }
+                                        : current,
+                                    )
+                                  }
+                                  className="min-h-24 rounded-2xl border-border/70 bg-background/90 text-sm leading-7"
+                                  autoFocus
+                                />
+                                <div className="flex gap-2">
+                                  <Button
+                                    size="sm"
+                                    className="rounded-xl"
+                                    onClick={handleSaveInlineEdit}
+                                  >
+                                    Save
+                                  </Button>
+                                  <Button
+                                    size="sm"
+                                    variant="outline"
+                                    className="rounded-xl"
+                                    onClick={handleCancelInlineEdit}
+                                  >
+                                    Cancel
+                                  </Button>
+                                </div>
+                              </div>
+                            ) : (
+                              <p
+                                onDoubleClick={() =>
+                                  handleOpenInlineEdit(segment, "source")
+                                }
+                                className={cn(
+                                  "line-clamp-3 text-sm leading-7 text-foreground",
+                                  segment.status !== "approved" &&
+                                    canOperateSegment(segment) &&
+                                    "cursor-text rounded-xl transition-colors hover:bg-muted/35 hover:px-2 hover:py-1",
+                                )}
+                              >
+                                {segment.source_text}
+                              </p>
+                            )}
+                          </TableCell>
+                          <TableCell className="max-w-[360px] whitespace-normal">
+                            {inlineEditState?.segmentId ===
+                              segment.segment_id &&
+                            inlineEditState.field === "output" ? (
+                              <div className="space-y-2">
+                                <Textarea
+                                  value={inlineEditState.value}
+                                  onChange={(event) =>
+                                    setInlineEditState((current) =>
+                                      current
+                                        ? {
+                                            ...current,
+                                            value: event.target.value,
+                                          }
+                                        : current,
+                                    )
+                                  }
+                                  className="min-h-24 rounded-2xl border-border/70 bg-background/90 text-sm leading-7"
+                                  autoFocus
+                                />
+                                <div className="flex gap-2">
+                                  <Button
+                                    size="sm"
+                                    className="rounded-xl"
+                                    onClick={handleSaveInlineEdit}
+                                  >
+                                    Save
+                                  </Button>
+                                  <Button
+                                    size="sm"
+                                    variant="outline"
+                                    className="rounded-xl"
+                                    onClick={handleCancelInlineEdit}
+                                  >
+                                    Cancel
+                                  </Button>
+                                </div>
+                              </div>
+                            ) : (
+                              <p
+                                onDoubleClick={() =>
+                                  handleOpenInlineEdit(segment, "output")
+                                }
+                                className={cn(
+                                  "line-clamp-3 text-sm leading-7 text-muted-foreground",
+                                  segment.status !== "approved" &&
+                                    canOperateSegment(segment) &&
+                                    "cursor-text rounded-xl transition-colors hover:bg-muted/35 hover:px-2 hover:py-1",
+                                )}
+                              >
+                                {getSegmentOutputText(segment) ||
+                                  "Not yet translated"}
+                              </p>
+                            )}
+                          </TableCell>
+                          <TableCell>
+                            {segment.status !== "approved" ? (
+                              <div className="flex flex-wrap gap-2">
+                                <Button
+                                  size="icon-sm"
+                                  variant="outline"
+                                  className="rounded-xl border-amber-300/80 text-amber-700 hover:bg-amber-100/80 dark:border-amber-900/70 dark:text-amber-200 dark:hover:bg-amber-950/50"
+                                  onClick={() => void handleRetry(segment)}
+                                  disabled={
+                                    retryingId === segment.segment_id ||
+                                    !canOperateSegment(segment)
+                                  }
+                                  title="Retranslate segment"
+                                  aria-label={`Retranslate segment ${segment.segment_id}`}
+                                >
+                                  {retryingId === segment.segment_id ? (
+                                    <Spinner className="h-3.5 w-3.5" />
+                                  ) : (
+                                    <RotateCcw className="h-3.5 w-3.5" />
+                                  )}
+                                </Button>
+                                {hasTranslatedOutput(segment) ? (
+                                  <Button
+                                    size="icon-sm"
+                                    variant="outline"
+                                    className="rounded-xl border-emerald-300/80 text-emerald-700 hover:bg-emerald-100/80 dark:border-emerald-900/70 dark:text-emerald-200 dark:hover:bg-emerald-950/50"
+                                    onClick={() =>
+                                      void handleApprove(
+                                        segment,
+                                        getSegmentOutputText(segment),
+                                      )
+                                    }
+                                    disabled={!canApproveSegment(segment)}
+                                    title="Approve translation"
+                                    aria-label={`Approve segment ${segment.segment_id}`}
+                                  >
+                                    <Check className="h-3.5 w-3.5" />
+                                  </Button>
+                                ) : null}
+                              </div>
+                            ) : (
+                              <Badge
+                                variant="outline"
+                                className="rounded-full border-emerald-300/80 bg-emerald-100/80 text-[10px] font-semibold uppercase tracking-[0.16em] text-emerald-800 dark:border-emerald-800/80 dark:bg-emerald-950/45 dark:text-emerald-200"
+                              >
+                                Locked
+                              </Badge>
+                            )}
+                          </TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                </div>
+              )}
 
-            {viewMode !== "cards" ? (
-              <div className="flex flex-col gap-3 rounded-[1.4rem] border border-border/70 bg-background/75 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
-                <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:gap-4">
-                  <p className="text-sm text-muted-foreground">
-                    Page {currentPage} of {pageCount} • Showing{" "}
-                    {visibleSegments.length} of {filteredSegments.length}{" "}
-                    segments
-                  </p>
-                  {viewMode === "table" ? (
-                    <div className="flex items-center gap-2">
-                      <span className="text-sm text-muted-foreground">
-                        Rows
-                      </span>
-                      <Select
-                        value={String(tablePageSize)}
-                        onValueChange={(value) => {
-                          setTablePageSize(Number(value));
-                          setCurrentPage(1);
-                        }}
-                      >
-                        <SelectTrigger className="h-9 w-[88px] rounded-xl border-border/70 bg-background/90 text-sm">
-                          <SelectValue />
-                        </SelectTrigger>
-                        <SelectContent>
-                          {TABLE_PAGE_SIZE_OPTIONS.map((size) => (
-                            <SelectItem key={size} value={String(size)}>
-                              {size}
-                            </SelectItem>
-                          ))}
-                        </SelectContent>
-                      </Select>
-                    </div>
-                  ) : null}
+              {viewMode !== "cards" ? (
+                <div className="flex flex-col gap-3 rounded-[1.4rem] border border-border/70 bg-background/75 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+                  <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:gap-4">
+                    <p className="text-sm text-muted-foreground">
+                      Page {currentPage} of {pageCount} • Showing{" "}
+                      {visibleSegments.length} of {filteredSegments.length}{" "}
+                      segments
+                    </p>
+                    {viewMode === "table" ? (
+                      <div className="flex items-center gap-2">
+                        <span className="text-sm text-muted-foreground">
+                          Rows
+                        </span>
+                        <Select
+                          value={String(tablePageSize)}
+                          onValueChange={(value) => {
+                            setTablePageSize(Number(value));
+                            setCurrentPage(1);
+                          }}
+                        >
+                          <SelectTrigger className="h-9 w-[88px] rounded-xl border-border/70 bg-background/90 text-sm">
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            {TABLE_PAGE_SIZE_OPTIONS.map((size) => (
+                              <SelectItem key={size} value={String(size)}>
+                                {size}
+                              </SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                      </div>
+                    ) : null}
+                  </div>
+                  <div className="flex gap-2">
+                    <Button
+                      variant="outline"
+                      className="rounded-xl"
+                      onClick={() =>
+                        setCurrentPage((page) => Math.max(1, page - 1))
+                      }
+                      disabled={currentPage === 1}
+                    >
+                      Previous
+                    </Button>
+                    <Button
+                      variant="outline"
+                      className="rounded-xl"
+                      onClick={() =>
+                        setCurrentPage((page) => Math.min(pageCount, page + 1))
+                      }
+                      disabled={currentPage === pageCount}
+                    >
+                      Next
+                    </Button>
+                  </div>
                 </div>
-                <div className="flex gap-2">
-                  <Button
-                    variant="outline"
-                    className="rounded-xl"
-                    onClick={() =>
-                      setCurrentPage((page) => Math.max(1, page - 1))
-                    }
-                    disabled={currentPage === 1}
-                  >
-                    Previous
-                  </Button>
-                  <Button
-                    variant="outline"
-                    className="rounded-xl"
-                    onClick={() =>
-                      setCurrentPage((page) => Math.min(pageCount, page + 1))
-                    }
-                    disabled={currentPage === pageCount}
-                  >
-                    Next
-                  </Button>
-                </div>
-              </div>
-            ) : null}
-          </>
-        )}
-      </div>
+              ) : null}
+            </>
+          )}
+        </div>
       )}
     </>
   );

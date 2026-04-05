@@ -375,8 +375,6 @@ export interface CollaborationAssignment {
   updated_at?: string | null;
 }
 
-
-
 export interface BackendDocumentCollaborator {
   document_id: string;
   collaborator_clerk_user_id: string;
@@ -434,7 +432,7 @@ export async function getDocument(id: string) {
 }
 
 export async function getDocuments(): Promise<DocumentSummary[]> {
-  return deduplicate('getDocuments', async () => {
+  return deduplicate("getDocuments", async () => {
     const res = await apiClient.get<DocumentSummary[]>("/documents");
     return res.data;
   });
@@ -448,12 +446,16 @@ export async function validateDocument(
   documentId: string,
   autoFix = false,
 ): Promise<ValidationResult[]> {
-  const res = await apiClient.post<ValidationResult[]>("/validate", {
-    document_id: documentId,
-    auto_fix: autoFix,
-  }, {
-    timeout: 0,
-  });
+  const res = await apiClient.post<ValidationResult[]>(
+    "/validate",
+    {
+      document_id: documentId,
+      auto_fix: autoFix,
+    },
+    {
+      timeout: 0,
+    },
+  );
   return res.data;
 }
 
@@ -551,7 +553,7 @@ export async function getSegments(
   status?: string,
   type?: string,
 ): Promise<Segment[]> {
-  const key = `getSegments:${docId}:${status ?? ''}:${type ?? ''}`;
+  const key = `getSegments:${docId}:${status ?? ""}:${type ?? ""}`;
   return deduplicate(key, async () => {
     const res = await apiClient.get<Segment[]>(`/segments/${docId}`, {
       params: { status, type },
@@ -575,7 +577,10 @@ export async function assignSegments(
   segmentIds: string[],
   assigneeClerkUserId: string,
 ): Promise<{ document_id: string; assignments: CollaborationAssignment[] }> {
-  const res = await apiClient.post<{ document_id: string; assignments: CollaborationAssignment[] }>(
+  const res = await apiClient.post<{
+    document_id: string;
+    assignments: CollaborationAssignment[];
+  }>(
     "/collaboration/assign",
     {
       document_id: documentId,
@@ -592,7 +597,10 @@ export async function claimSegments(
   segmentIds: string[],
   assigneeClerkUserId: string,
 ): Promise<{ document_id: string; assignments: CollaborationAssignment[] }> {
-  const res = await apiClient.post<{ document_id: string; assignments: CollaborationAssignment[] }>(
+  const res = await apiClient.post<{
+    document_id: string;
+    assignments: CollaborationAssignment[];
+  }>(
     "/collaboration/claim",
     {
       document_id: documentId,
@@ -603,8 +611,6 @@ export async function claimSegments(
   );
   return res.data;
 }
-
-
 
 export async function approveSegment(
   segmentId: string,
@@ -653,9 +659,14 @@ export async function getExportStatus(
 export async function downloadExport(
   documentId: string,
   format: ExportFormat,
+  includeUntranslated?: boolean,
 ): Promise<string> {
+  const params = new URLSearchParams({ format });
+  if (includeUntranslated) {
+    params.append("include_untranslated", "true");
+  }
   const response = await apiClient.post<Blob>(
-    `/export/${documentId}?format=${format}`,
+    `/export/${documentId}?${params.toString()}`,
     undefined,
     {
       responseType: "blob",
@@ -749,7 +760,9 @@ export async function addDocumentCollaborator(
   });
 
   if (!response.ok) {
-    const payload = (await response.json().catch(() => null)) as { error?: string } | null;
+    const payload = (await response.json().catch(() => null)) as {
+      error?: string;
+    } | null;
     throw new Error(payload?.error || "Failed to add collaborator.");
   }
 
@@ -769,7 +782,9 @@ export async function removeDocumentCollaborator(
   });
 
   if (!response.ok) {
-    const payload = (await response.json().catch(() => null)) as { error?: string } | null;
+    const payload = (await response.json().catch(() => null)) as {
+      error?: string;
+    } | null;
     throw new Error(payload?.error || "Failed to remove collaborator.");
   }
 
@@ -787,7 +802,9 @@ export async function getDocumentPresence(
     });
 
     if (!response.ok) {
-      const payload = (await response.json().catch(() => null)) as { error?: string } | null;
+      const payload = (await response.json().catch(() => null)) as {
+        error?: string;
+      } | null;
       throw new Error(payload?.error || "Failed to load presence.");
     }
 
@@ -806,16 +823,16 @@ export async function heartbeatDocumentPresence(
   });
 
   if (!response.ok) {
-    const payload = (await response.json().catch(() => null)) as { error?: string } | null;
+    const payload = (await response.json().catch(() => null)) as {
+      error?: string;
+    } | null;
     throw new Error(payload?.error || "Failed to update presence.");
   }
 
   return response.json();
 }
 
-export async function clearDocumentPresence(
-  documentId: string,
-): Promise<void> {
+export async function clearDocumentPresence(documentId: string): Promise<void> {
   const response = await fetch(`/api/documents/${documentId}/presence`, {
     method: "DELETE",
     headers: {
@@ -830,7 +847,7 @@ export async function clearDocumentPresence(
 }
 
 export async function getShareOverview(): Promise<ShareOverviewResponse> {
-  return deduplicate('getShareOverview', async () => {
+  return deduplicate("getShareOverview", async () => {
     const response = await fetch("/api/shares", {
       method: "GET",
       cache: "no-store",
