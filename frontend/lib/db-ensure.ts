@@ -35,6 +35,44 @@ export async function ensureAppTables() {
   `)
 
   await db.execute(sql`
+    CREATE TABLE IF NOT EXISTS document_collaborators (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+      document_id text NOT NULL,
+      collaborator_clerk_user_id text NOT NULL,
+      collaborator_email text NOT NULL,
+      collaborator_name text,
+      role text NOT NULL DEFAULT 'viewer',
+      added_by_clerk_user_id text NOT NULL,
+      created_at timestamptz NOT NULL DEFAULT now(),
+      updated_at timestamptz NOT NULL DEFAULT now()
+    )
+  `)
+
+  await db.execute(sql`
+    CREATE UNIQUE INDEX IF NOT EXISTS document_collaborators_doc_user_uidx
+    ON document_collaborators (document_id, collaborator_clerk_user_id)
+  `)
+
+  await db.execute(sql`
+    CREATE TABLE IF NOT EXISTS document_presence (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+      document_id text NOT NULL,
+      collaborator_clerk_user_id text NOT NULL,
+      collaborator_email text NOT NULL,
+      collaborator_name text,
+      role text NOT NULL,
+      last_seen_at timestamptz NOT NULL DEFAULT now(),
+      created_at timestamptz NOT NULL DEFAULT now(),
+      updated_at timestamptz NOT NULL DEFAULT now()
+    )
+  `)
+
+  await db.execute(sql`
+    CREATE UNIQUE INDEX IF NOT EXISTS document_presence_doc_user_uidx
+    ON document_presence (document_id, collaborator_clerk_user_id)
+  `)
+
+  await db.execute(sql`
     CREATE TABLE IF NOT EXISTS document_share_access (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
       share_id text NOT NULL,

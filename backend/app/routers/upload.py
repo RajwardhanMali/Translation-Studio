@@ -17,6 +17,7 @@ from app.models.schemas import UploadResponse
 from app.services.parser import parse_document
 from app.services.segmenter import segment_blocks
 from app.services.document_classifier import classify_document
+from app.services.collaboration import get_current_backend_collaborator
 from app.utils.file_handler import get_upload_path
 from app.utils.firebase_config import upload_file_to_firebase
 
@@ -34,11 +35,10 @@ ALLOWED_EXTENSIONS = {".pdf": "pdf", ".docx": "docx"}
 async def upload_document(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    collaborator = Depends(get_current_backend_collaborator),
 ):
-    # For now, we stub user_id until auth is fully enforced
-    # (Phase 4 will add `user_id` extraction from headers to all endpoints)
-    user_id = None
+    user_id = collaborator.clerk_user_id if collaborator else None
 
     suffix     = Path(file.filename).suffix.lower()
     file_type  = ALLOWED_EXTENSIONS.get(suffix)

@@ -6,13 +6,20 @@ DELETE /document/{id}   — delete a document and all associated data
 """
 
 import logging
-from typing import List, Optional
 from fastapi import APIRouter, HTTPException, Depends
 from sqlalchemy.orm import Session
-from sqlalchemy import func, Integer
+from sqlalchemy import func, Integer, or_
 
 from app.database import get_db
-from app.models.domain import Document, Segment
+from app.models.domain import Document, DocumentCollaborator, Segment
+from app.services.collaboration import (
+    enrich_collaborator,
+    ensure_collaboration_tables,
+    get_current_backend_collaborator,
+    require_document_membership,
+    require_document_role,
+    sync_document_owner_membership,
+)
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["documents"])
@@ -27,17 +34,49 @@ router = APIRouter(tags=["documents"])
 # ---------------------------------------------------------------------------
 
 @router.get("/documents")
-async def list_documents(db: Session = Depends(get_db)):
+async def list_documents(
+    db: Session = Depends(get_db),
+    collaborator=Depends(get_current_backend_collaborator),
+):
     """
     List every document that has been uploaded.
     Returns filename, type, upload date, block count, and translation
     progress (pending / reviewed / approved segment counts + % complete).
     """
-    # 1. Fetch documents
-    docs = db.query(Document).order_by(Document.created_at.desc()).all()
+    ensure_collaboration_tables(db)
+    collaborator = enrich_collaborator(db, collaborator)
+
+    collaborator_rows = (
+        db.query(DocumentCollaborator)
+        .filter(DocumentCollaborator.collaborator_clerk_user_id == collaborator.clerk_user_id)
+        .all()
+    )
+    collaborator_document_ids = list({row.document_id for row in collaborator_rows})
+
+    visibility_filters = [Document.user_id == collaborator.clerk_user_id]
+    if collaborator_document_ids:
+        visibility_filters.append(Document.id.in_(collaborator_document_ids))
+
+    docs = (
+        db.query(Document)
+        .filter(or_(*visibility_filters))
+        .order_by(Document.created_at.desc())
+        .all()
+    )
     
     if not docs:
         return []
+
+    for doc in docs:
+        sync_document_owner_membership(db, doc.id)
+
+    refreshed_rows = (
+        db.query(DocumentCollaborator)
+        .filter(DocumentCollaborator.document_id.in_([d.id for d in docs]))
+        .filter(DocumentCollaborator.collaborator_clerk_user_id == collaborator.clerk_user_id)
+        .all()
+    )
+    collaborator_map = {row.document_id: row for row in refreshed_rows}
 
     # 2. Fetch aggregate segment stats in ONE query instead of N+1
     # We group by document_id and count statuses
@@ -78,6 +117,9 @@ async def list_documents(db: Session = Depends(get_db)):
             "segments": st,
             "translation_progress": progress,
             "firebase_url": doc.firebase_url,
+            "owner_clerk_user_id": doc.user_id,
+            "access_role": "owner" if doc.user_id == collaborator.clerk_user_id else (collaborator_map.get(doc.id).role if collaborator_map.get(doc.id) else "viewer"),
+            "is_owner": doc.user_id == collaborator.clerk_user_id,
         })
         
     return results
@@ -88,11 +130,19 @@ async def list_documents(db: Session = Depends(get_db)):
 # ---------------------------------------------------------------------------
 
 @router.get("/document/{document_id}")
-async def get_document(document_id: str, db: Session = Depends(get_db)):
+async def get_document(
+    document_id: str,
+    db: Session = Depends(get_db),
+    collaborator=Depends(get_current_backend_collaborator),
+):
     """
     Retrieve a parsed document by its ID.
     Returns the full JSON representation including all blocks.
     """
+    ensure_collaboration_tables(db)
+    collaborator = enrich_collaborator(db, collaborator)
+    require_document_membership(db, document_id, collaborator)
+
     doc = db.query(Document).filter(Document.id == document_id).first()
     if not doc:
         raise HTTPException(
@@ -116,12 +166,20 @@ async def get_document(document_id: str, db: Session = Depends(get_db)):
 # ---------------------------------------------------------------------------
 
 @router.delete("/document/{document_id}")
-async def delete_document(document_id: str, db: Session = Depends(get_db)):
+async def delete_document(
+    document_id: str,
+    db: Session = Depends(get_db),
+    collaborator=Depends(get_current_backend_collaborator),
+):
     """
     Delete a document and all its associated data:
     TM entries have foreign key ONDELETE=SET NULL so they are kept.
     Segments have ONDELETE=CASCADE so they are wiped.
     """
+    ensure_collaboration_tables(db)
+    collaborator = enrich_collaborator(db, collaborator)
+    require_document_role(db, document_id, collaborator, ["owner"])
+
     doc = db.query(Document).filter(Document.id == document_id).first()
     if not doc:
         raise HTTPException(status_code=404, detail=f"Document '{document_id}' not found.")

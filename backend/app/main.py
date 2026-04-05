@@ -63,6 +63,7 @@ from app.routers.translation import router as translation_router
 from app.routers.review      import router as review_router
 from app.routers.glossary    import router as glossary_router
 from app.routers.export      import router as export_router
+from app.routers.collaboration import router as collaboration_router
 
 
 # ---------------------------------------------------------------------------
@@ -94,6 +95,17 @@ async def lifespan(app: FastAPI):
         logger.warning(f"Encoder not pre-loaded: {e}")
 
     # Pre-load FAISS translation memory - REMOVED for Postgresql/pgvector
+    try:
+        from app.database import SessionLocal
+        from app.services.collaboration import ensure_collaboration_tables
+        db = SessionLocal()
+        try:
+            ensure_collaboration_tables(db)
+            logger.info("Collaboration tables ready.")
+        finally:
+            db.close()
+    except Exception as e:
+        logger.warning(f"Collaboration tables not ensured: {e}")
 
     logger.info("=== Translation Studio ready ===")
     yield
@@ -138,6 +150,7 @@ app.include_router(translation_router)
 app.include_router(review_router)
 app.include_router(glossary_router)
 app.include_router(export_router)
+app.include_router(collaboration_router)
 
 
 # ---------------------------------------------------------------------------

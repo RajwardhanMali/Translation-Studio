@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { AnimatePresence, motion } from 'framer-motion'
-import { ArrowRight, CheckCircle2, Clock, File, FileCode, FileText, FolderOpen, LayoutGrid, Link2, List, Loader2, RefreshCw, Search, SearchX, Sparkles, Trash2, TrendingUp, X } from 'lucide-react'
+import { ArrowRight, CheckCircle2, Clock, File, FileCode, FileText, FolderOpen, LayoutGrid, Link2, List, Loader2, RefreshCw, Search, SearchX, Sparkles, Trash2, TrendingUp, UserPlus, Users, X } from 'lucide-react'
 import {
   AlertDialog,
   AlertDialogAction,
@@ -27,6 +27,216 @@ import { useToast } from '@/hooks/use-toast'
 import { Card } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+import {
+  addDocumentCollaborator,
+  getDocumentCollaborators,
+  removeDocumentCollaborator,
+  type CollaboratorRole,
+  type DocumentCollaborator,
+  type DocumentCollaboratorsResponse,
+} from '@/lib/api'
+
+function CollaboratorsDialog({
+  open,
+  document,
+  onOpenChange,
+}: {
+  open: boolean
+  document: DocumentSummary | null
+  onOpenChange: (open: boolean) => void
+}) {
+  const { toast } = useToast()
+  const [loading, setLoading] = useState(false)
+  const [submitting, setSubmitting] = useState(false)
+  const [email, setEmail] = useState('')
+  const [role, setRole] = useState<Exclude<CollaboratorRole, 'owner'>>('editor')
+  const [data, setData] = useState<DocumentCollaboratorsResponse | null>(null)
+
+  useEffect(() => {
+    if (!open || !document) return
+
+    setLoading(true)
+    void getDocumentCollaborators(document.id)
+      .then((response) => setData(response))
+      .catch((error) => {
+        toast({
+          title: 'Could not load collaborators',
+          description: error instanceof Error ? error.message : 'The collaboration workspace could not be opened.',
+          variant: 'destructive',
+        })
+        onOpenChange(false)
+      })
+      .finally(() => setLoading(false))
+  }, [document, onOpenChange, open, toast])
+
+  useEffect(() => {
+    if (!open) {
+      setEmail('')
+      setRole('editor')
+      setData(null)
+    }
+  }, [open])
+
+  const canManage = data?.currentRole === 'owner'
+
+  const handleAdd = async () => {
+    if (!document || !email.trim()) return
+    setSubmitting(true)
+    try {
+      const response = await addDocumentCollaborator(document.id, email.trim(), role)
+      setData(response)
+      setEmail('')
+      toast({
+        title: 'Collaborator added',
+        description: 'The registered user now has access to this document.',
+      })
+    } catch (error) {
+      toast({
+        title: 'Could not add collaborator',
+        description: error instanceof Error ? error.message : 'The collaborator could not be added.',
+        variant: 'destructive',
+      })
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  const handleRemove = async (collaborator: DocumentCollaborator) => {
+    if (!document) return
+    setSubmitting(true)
+    try {
+      const response = await removeDocumentCollaborator(
+        document.id,
+        collaborator.collaboratorClerkUserId,
+      )
+      setData(response)
+      toast({
+        title: 'Collaborator removed',
+        description: `${collaborator.collaboratorEmail} no longer has access.`,
+      })
+    } catch (error) {
+      toast({
+        title: 'Could not remove collaborator',
+        description: error instanceof Error ? error.message : 'The collaborator could not be removed.',
+        variant: 'destructive',
+      })
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="sm:max-w-2xl">
+        <DialogHeader>
+          <DialogTitle>Shared Translation Space</DialogTitle>
+          <DialogDescription>
+            {document
+              ? `Manage registered collaborators for ${document.filename}. Owners can invite editors and viewers here.`
+              : 'Manage collaborators.'}
+          </DialogDescription>
+        </DialogHeader>
+
+        {loading ? (
+          <div className="flex items-center justify-center py-12">
+            <Spinner className="h-6 w-6 text-primary" />
+          </div>
+        ) : data ? (
+          <div className="space-y-6">
+            <div className="rounded-2xl border border-border/70 bg-muted/30 p-4">
+              <div className="flex items-center gap-2">
+                <Users className="h-4 w-4 text-primary" />
+                <p className="text-sm font-medium text-foreground">
+                  {data.collaborators.length} collaborator{data.collaborators.length === 1 ? '' : 's'}
+                </p>
+              </div>
+              <p className="mt-2 text-xs text-muted-foreground">
+                Only registered users can collaborate. Editors will be the only non-owner role allowed to approve segments in later phases.
+              </p>
+            </div>
+
+            {canManage ? (
+              <div className="grid gap-3 rounded-2xl border border-border/70 bg-background/80 p-4 md:grid-cols-[1fr_160px_auto]">
+                <Input
+                  value={email}
+                  onChange={(event) => setEmail(event.target.value)}
+                  placeholder="Enter a registered user's email"
+                  className="rounded-xl"
+                />
+                <Select
+                  value={role}
+                  onValueChange={(value) => setRole(value as Exclude<CollaboratorRole, 'owner'>)}
+                >
+                  <SelectTrigger className="rounded-xl">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="editor">Editor</SelectItem>
+                    <SelectItem value="viewer">Viewer</SelectItem>
+                  </SelectContent>
+                </Select>
+                <Button
+                  className="rounded-xl"
+                  onClick={() => void handleAdd()}
+                  disabled={submitting || !email.trim()}
+                >
+                  {submitting ? <Spinner className="mr-2 h-4 w-4" /> : <UserPlus className="mr-2 h-4 w-4" />}
+                  Add
+                </Button>
+              </div>
+            ) : (
+              <div className="rounded-2xl border border-border/70 bg-background/80 p-4 text-sm text-muted-foreground">
+                You can view collaborators on this document, but only the owner can add or remove team members.
+              </div>
+            )}
+
+            <div className="space-y-3">
+              {data.collaborators.map((collaborator) => (
+                <div
+                  key={collaborator.id}
+                  className="flex flex-col gap-3 rounded-2xl border border-border/70 bg-background/70 p-4 sm:flex-row sm:items-center sm:justify-between"
+                >
+                  <div className="min-w-0">
+                    <p className="truncate text-sm font-medium text-foreground">
+                      {collaborator.collaboratorName || collaborator.collaboratorEmail}
+                    </p>
+                    <p className="truncate text-xs text-muted-foreground">
+                      {collaborator.collaboratorEmail}
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <Badge variant="outline" className="rounded-full capitalize">
+                      {collaborator.role}
+                    </Badge>
+                    {canManage && collaborator.role !== 'owner' ? (
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="rounded-xl"
+                        disabled={submitting}
+                        onClick={() => void handleRemove(collaborator)}
+                      >
+                        Remove
+                      </Button>
+                    ) : null}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        ) : null}
+      </DialogContent>
+    </Dialog>
+  )
+}
 
 function formatRelativeTime(value: string) {
   const target = new Date(value).getTime()
@@ -102,16 +312,20 @@ function DocumentCard({
   document,
   deleting,
   received,
+  canManage,
   onOpen,
   onDelete,
   onShare,
+  onCollaborate,
 }: {
   document: DocumentSummary
   deleting: boolean
   received: boolean
+  canManage: boolean
   onOpen: () => void
   onDelete: () => Promise<void>
   onShare: () => Promise<void>
+  onCollaborate: () => void
 }) {
   const FileIcon = document.file_type === 'pdf' ? FileText : File
 
@@ -159,43 +373,51 @@ function DocumentCard({
         </div>
 
         <div className="flex flex-wrap justify-end gap-2">
-          <Button variant="outline" className="rounded-xl" onClick={() => void onShare()}>
-            <Link2 className="mr-1.5 h-4 w-4" />
-            Share
+          <Button variant="outline" className="rounded-xl" onClick={onCollaborate}>
+            <Users className="mr-1.5 h-4 w-4" />
+            {canManage ? 'Team' : 'Members'}
           </Button>
+          {canManage ? (
+            <Button variant="outline" className="rounded-xl" onClick={() => void onShare()}>
+              <Link2 className="mr-1.5 h-4 w-4" />
+              Share
+            </Button>
+          ) : null}
           <Button variant="outline" className="rounded-xl" onClick={onOpen}>
             Open
             <ArrowRight className="ml-1.5 h-4 w-4" />
           </Button>
-          <AlertDialog>
-            <AlertDialogTrigger asChild>
-              <Button variant="outline" className="rounded-xl border-red-200 text-red-700 hover:bg-red-50 hover:text-red-700 dark:border-red-900/60 dark:text-red-200 dark:hover:bg-red-950/40">
-                {deleting ? <Spinner className="mr-1.5 h-4 w-4" /> : <Trash2 className="mr-1.5 h-4 w-4" />}
-                Delete
-              </Button>
-            </AlertDialogTrigger>
-            <AlertDialogContent>
-              <AlertDialogHeader>
-                <AlertDialogTitle>Delete document?</AlertDialogTitle>
-                <AlertDialogDescription>
-                  {document.filename} will be removed from your library. This action cannot be undone.
-                </AlertDialogDescription>
-              </AlertDialogHeader>
-              <AlertDialogFooter>
-                <AlertDialogCancel>Cancel</AlertDialogCancel>
-                <AlertDialogAction
-                  onClick={(event) => {
-                    event.preventDefault()
-                    void onDelete()
-                  }}
-                  className="bg-red-600 hover:bg-red-700"
-                >
-                  {deleting ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
+          {canManage ? (
+            <AlertDialog>
+              <AlertDialogTrigger asChild>
+                <Button variant="outline" className="rounded-xl border-red-200 text-red-700 hover:bg-red-50 hover:text-red-700 dark:border-red-900/60 dark:text-red-200 dark:hover:bg-red-950/40">
+                  {deleting ? <Spinner className="mr-1.5 h-4 w-4" /> : <Trash2 className="mr-1.5 h-4 w-4" />}
                   Delete
-                </AlertDialogAction>
-              </AlertDialogFooter>
-            </AlertDialogContent>
-          </AlertDialog>
+                </Button>
+              </AlertDialogTrigger>
+              <AlertDialogContent>
+                <AlertDialogHeader>
+                  <AlertDialogTitle>Delete document?</AlertDialogTitle>
+                  <AlertDialogDescription>
+                    {document.filename} will be removed from your library. This action cannot be undone.
+                  </AlertDialogDescription>
+                </AlertDialogHeader>
+                <AlertDialogFooter>
+                  <AlertDialogCancel>Cancel</AlertDialogCancel>
+                  <AlertDialogAction
+                    onClick={(event) => {
+                      event.preventDefault()
+                      void onDelete()
+                    }}
+                    className="bg-red-600 hover:bg-red-700"
+                  >
+                    {deleting ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
+                    Delete
+                  </AlertDialogAction>
+                </AlertDialogFooter>
+              </AlertDialogContent>
+            </AlertDialog>
+          ) : null}
         </div>
       </div>
     </HoverCard>
@@ -206,16 +428,20 @@ function DocumentRow({
   document,
   deleting,
   received,
+  canManage,
   onOpen,
   onDelete,
   onShare,
+  onCollaborate,
 }: {
   document: DocumentSummary
   deleting: boolean
   received: boolean
+  canManage: boolean
   onOpen: () => void
   onDelete: () => Promise<void>
   onShare: () => Promise<void>
+  onCollaborate: () => void
 }) {
   const FileIcon = document.file_type === 'pdf' ? FileText : File
 
@@ -268,39 +494,46 @@ function DocumentRow({
       </div>
 
       <div className="flex items-center gap-2">
-        <Button variant="ghost" size="icon" className="h-9 w-9 rounded-xl hover:bg-primary/10 hover:text-primary" onClick={() => void onShare()}>
-          <Link2 className="h-4 w-4" />
+        <Button variant="ghost" size="icon" className="h-9 w-9 rounded-xl hover:bg-primary/10 hover:text-primary" onClick={onCollaborate}>
+          <Users className="h-4 w-4" />
         </Button>
+        {canManage ? (
+          <Button variant="ghost" size="icon" className="h-9 w-9 rounded-xl hover:bg-primary/10 hover:text-primary" onClick={() => void onShare()}>
+            <Link2 className="h-4 w-4" />
+          </Button>
+        ) : null}
         <Button variant="ghost" size="icon" className="h-9 w-9 rounded-xl hover:bg-primary/10 hover:text-primary" onClick={onOpen}>
           <ArrowRight className="h-4 w-4" />
         </Button>
-        <AlertDialog>
-          <AlertDialogTrigger asChild>
-            <Button variant="ghost" size="icon" className="h-9 w-9 rounded-xl text-red-500 hover:bg-red-50 hover:text-red-700 dark:hover:bg-red-950/40">
-              {deleting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}
-            </Button>
-          </AlertDialogTrigger>
-          <AlertDialogContent>
-            <AlertDialogHeader>
-              <AlertDialogTitle>Delete document?</AlertDialogTitle>
-              <AlertDialogDescription>
-                {document.filename} will be removed from your library.
-              </AlertDialogDescription>
-            </AlertDialogHeader>
-            <AlertDialogFooter>
-              <AlertDialogCancel>Cancel</AlertDialogCancel>
-              <AlertDialogAction
-                onClick={(event) => {
-                  event.preventDefault()
-                  void onDelete()
-                }}
-                className="bg-red-600 hover:bg-red-700"
-              >
-                Delete
-              </AlertDialogAction>
-            </AlertDialogFooter>
-          </AlertDialogContent>
-        </AlertDialog>
+        {canManage ? (
+          <AlertDialog>
+            <AlertDialogTrigger asChild>
+              <Button variant="ghost" size="icon" className="h-9 w-9 rounded-xl text-red-500 hover:bg-red-50 hover:text-red-700 dark:hover:bg-red-950/40">
+                {deleting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}
+              </Button>
+            </AlertDialogTrigger>
+            <AlertDialogContent>
+              <AlertDialogHeader>
+                <AlertDialogTitle>Delete document?</AlertDialogTitle>
+                <AlertDialogDescription>
+                  {document.filename} will be removed from your library.
+                </AlertDialogDescription>
+              </AlertDialogHeader>
+              <AlertDialogFooter>
+                <AlertDialogCancel>Cancel</AlertDialogCancel>
+                <AlertDialogAction
+                  onClick={(event) => {
+                    event.preventDefault()
+                    void onDelete()
+                  }}
+                  className="bg-red-600 hover:bg-red-700"
+                >
+                  Delete
+                </AlertDialogAction>
+              </AlertDialogFooter>
+            </AlertDialogContent>
+          </AlertDialog>
+        ) : null}
       </div>
     </HoverCard>
   )
@@ -319,6 +552,7 @@ export default function DocumentsPage() {
   const [deletingId, setDeletingId] = useState<string | null>(null)
   const [searchQuery, setSearchQuery] = useState('')
   const [activeTab, setActiveTab] = useState<'all' | 'personal' | 'shared'>('all')
+  const [collaborationDocument, setCollaborationDocument] = useState<DocumentSummary | null>(null)
 
   const handleRefresh = async () => {
     setRefreshing(true)
@@ -348,7 +582,7 @@ export default function DocumentsPage() {
   const filteredDocuments = useMemo(() => {
     return documents.filter((doc) => {
       const matchesSearch = doc.filename.toLowerCase().includes(searchQuery.toLowerCase())
-      const isReceived = shareOverview.receivedDocumentIds.includes(doc.id)
+      const isReceived = !doc.is_owner
       
       if (activeTab === 'personal') return matchesSearch && !isReceived
       if (activeTab === 'shared') return matchesSearch && isReceived
@@ -396,6 +630,13 @@ export default function DocumentsPage() {
       <LayoutHeader
         title="Documents"
         subtitle="Browse uploaded files, track progress, and reopen any document."
+      />
+      <CollaboratorsDialog
+        open={Boolean(collaborationDocument)}
+        document={collaborationDocument}
+        onOpenChange={(open) => {
+          if (!open) setCollaborationDocument(null)
+        }}
       />
       <div className="space-y-5">
       <div className="relative space-y-7">
@@ -586,20 +827,24 @@ export default function DocumentsPage() {
                   key={document.id}
                   document={document}
                   deleting={deletingId === document.id}
-                  received={shareOverview.receivedDocumentIds.includes(document.id)}
+                  received={!document.is_owner}
+                  canManage={document.access_role === 'owner'}
                   onOpen={() => router.push(`/translate?doc=${document.id}`)}
                   onDelete={() => handleDelete(document.id)}
                   onShare={() => handleShare(document.id)}
+                  onCollaborate={() => setCollaborationDocument(document)}
                 />
               ) : (
                 <DocumentRow
                   key={document.id}
                   document={document}
                   deleting={deletingId === document.id}
-                  received={shareOverview.receivedDocumentIds.includes(document.id)}
+                  received={!document.is_owner}
+                  canManage={document.access_role === 'owner'}
                   onOpen={() => router.push(`/translate?doc=${document.id}`)}
                   onDelete={() => handleDelete(document.id)}
                   onShare={() => handleShare(document.id)}
+                  onCollaborate={() => setCollaborationDocument(document)}
                 />
               )
             ))}
