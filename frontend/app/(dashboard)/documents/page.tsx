@@ -543,7 +543,7 @@ export default function DocumentsPage() {
   const router = useRouter()
   const { toast } = useToast()
   
-  // Use SWR hooks for caching and deduplication
+  // Use store-backed hooks for centralized state and deduplication
   const { documents, isLoading: loading, mutate: mutateDocs } = useDocuments()
   const { shareOverview, mutate: mutateShares } = useShareOverview()
   
