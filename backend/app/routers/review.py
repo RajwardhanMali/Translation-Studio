@@ -15,6 +15,7 @@ from app.database import get_db
 from app.models.domain import Document, Segment as SegmentDB
 from app.models.schemas import Segment, ApproveRequest, ApproveResponse
 from app.services.learning import on_segment_approved
+from app.utils.segment_order import sort_segments
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["review"])
@@ -39,7 +40,7 @@ async def get_segments(
     if seg_type:
         query = query.filter(SegmentDB.type == seg_type)
         
-    db_segments = query.all()
+    db_segments = sort_segments(query.all())
     
     # We order by position manually if needed, or assume they are ordered
     results = []

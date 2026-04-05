@@ -1,11 +1,18 @@
 import axios from "axios";
 
 const BASE_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+const NORMALIZED_BASE_URL = BASE_URL.replace(/\/+$/, "");
+
+function buildApiUrl(path: string) {
+  return `${NORMALIZED_BASE_URL}/${path.replace(/^\/+/, "")}`;
+}
 
 export const apiClient = axios.create({
   baseURL: BASE_URL,
   timeout: 30000,
 });
+
+type StreamEventHandler<T> = (event: T) => void;
 
 export interface UploadResponse {
   document_id: string;
@@ -31,13 +38,20 @@ export interface DocumentSummary {
 }
 
 export interface ValidationIssue {
+  segment_id?: string;
   issue_type: string;
   issue: string;
   suggestion: string;
   severity: "error" | "warning" | "info";
+  span?: string | null;
+  offset?: number | null;
+  length?: number | null;
+  confidence?: number | null;
+  source?: string | null;
 }
 
 export interface ValidationResult {
+  document_id?: string;
   segment_id?: string;
   text: string;
   issues: ValidationIssue[];
@@ -45,6 +59,40 @@ export interface ValidationResult {
   has_errors: boolean;
   has_warnings: boolean;
 }
+
+export type ValidationStreamEvent =
+  | {
+      type: "start";
+      document_id: string;
+      total_segments: number;
+    }
+  | {
+      type: "segment";
+      document_id: string;
+      segment_id?: string;
+      index: number;
+      result: ValidationResult;
+    }
+  | {
+      type: "progress";
+      document_id: string;
+      completed: number;
+      total: number;
+      invalid_segments: number;
+    }
+  | {
+      type: "complete";
+      document_id: string;
+      completed: number;
+      total: number;
+      invalid_segments: number;
+    }
+  | {
+      type: "error";
+      document_id?: string;
+      segment_id?: string;
+      message: string;
+    };
 
 export interface ValidationAppliedFix {
   segment_id: string;
@@ -123,7 +171,92 @@ export interface ApproveResponse {
 export interface TranslateResponse {
   document_id?: string;
   segments_translated: number;
-  results?: Segment[];
+  segments?: Segment[];
+}
+
+export type TranslationStreamEvent =
+  | {
+      type: "start";
+      document_id: string;
+      target_language: string;
+      total_segments: number;
+    }
+  | {
+      type: "segment";
+      document_id: string;
+      segment_id: string;
+      index: number;
+      batch: number;
+      total_batches: number;
+      segment: Record<string, unknown>;
+    }
+  | {
+      type: "progress";
+      document_id: string;
+      completed: number;
+      total: number;
+      translated: number;
+    }
+  | {
+      type: "complete";
+      document_id: string;
+      completed: number;
+      total: number;
+      translated: number;
+    }
+  | {
+      type: "error";
+      document_id?: string;
+      segment_id?: string;
+      message: string;
+    };
+
+async function streamNdjson<T>(
+  path: string,
+  body: Record<string, unknown>,
+  onEvent: StreamEventHandler<T>,
+  signal?: AbortSignal,
+): Promise<void> {
+  const response = await fetch(buildApiUrl(path), {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(body),
+    signal,
+  });
+
+  if (!response.ok) {
+    throw new Error(`Streaming request failed with status ${response.status}.`);
+  }
+
+  if (!response.body) {
+    throw new Error("Streaming response did not include a readable body.");
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split("\n");
+    buffer = lines.pop() ?? "";
+
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      onEvent(JSON.parse(trimmed) as T);
+    }
+  }
+
+  const finalChunk = buffer.trim();
+  if (finalChunk) {
+    onEvent(JSON.parse(finalChunk) as T);
+  }
 }
 
 export interface TranslateInfoResponse {
@@ -214,8 +347,27 @@ export async function validateDocument(
   const res = await apiClient.post<ValidationResult[]>("/validate", {
     document_id: documentId,
     auto_fix: autoFix,
+  }, {
+    timeout: 0,
   });
   return res.data;
+}
+
+export async function streamValidateDocument(
+  documentId: string,
+  autoFix: boolean,
+  onEvent: StreamEventHandler<ValidationStreamEvent>,
+  signal?: AbortSignal,
+): Promise<void> {
+  await streamNdjson<ValidationStreamEvent>(
+    "/validate/stream",
+    {
+      document_id: documentId,
+      auto_fix: autoFix,
+    },
+    onEvent,
+    signal,
+  );
 }
 
 export async function applyValidationFixes(
@@ -267,6 +419,27 @@ export async function translateDocument(
     },
   );
   return res.data;
+}
+
+export async function streamTranslateDocument(
+  documentId: string,
+  targetLanguage: string,
+  styleRules: string[] | undefined,
+  segmentIds: string[] | undefined,
+  onEvent: StreamEventHandler<TranslationStreamEvent>,
+  signal?: AbortSignal,
+): Promise<void> {
+  await streamNdjson<TranslationStreamEvent>(
+    "/translate/stream",
+    {
+      document_id: documentId,
+      target_language: targetLanguage,
+      style_rules: styleRules ?? [],
+      segment_ids: segmentIds,
+    },
+    onEvent,
+    signal,
+  );
 }
 
 export async function getSegments(

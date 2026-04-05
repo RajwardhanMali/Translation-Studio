@@ -9,7 +9,7 @@ import logging
 from typing import Optional, Tuple, List, Dict, Any
 
 import numpy as np
-from sqlalchemy import select, asc
+from sqlalchemy import select, func
 from sqlalchemy.orm import Session
 
 from app.database import SessionLocal
@@ -36,6 +36,21 @@ def classify_segment(
     db: Session = SessionLocal()
     try:
         lang = target_language.lower()
+        normalized_source = source_text.strip().lower()
+
+        exact_stmt = (
+            select(TranslationMemory)
+            .where(TranslationMemory.language == lang)
+            .where(func.lower(func.trim(TranslationMemory.source_text)) == normalized_source)
+            .limit(1)
+        )
+        exact_entry = db.execute(exact_stmt).scalar_one_or_none()
+        if exact_entry:
+            logger.info(
+                f"TM exact [text match] [{target_language}]: '{source_text[:50]}'"
+            )
+            return "exact", exact_entry.target_text, 1.0
+
         vec_list = embedding.tolist()
         
         # pgvector cosine distance: <-> returns distance (0.0 means identical, 2.0 means opposite).
@@ -101,6 +116,7 @@ def store_translation(
                 # Update existing (human correction overwrites)
                 entry.target_text = target_text
                 entry.document_id = document_id
+                entry.embedding = embedding.tolist()
                 db.commit()
                 logger.debug(f"TM updated existing entry [{lang}]: '{source_text[:50]}'")
                 return

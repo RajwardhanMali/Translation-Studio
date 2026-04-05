@@ -8,7 +8,9 @@ Endpoints:
 """
 
 import logging
+import json
 from fastapi import APIRouter, HTTPException, Depends
+from fastapi.responses import StreamingResponse
 from typing import List
 from sqlalchemy.orm import Session
 
@@ -25,12 +27,18 @@ from app.models.schemas import (
 from app.services.validator import (
     validate_text,
     validate_segments,
+    validate_segments_stream,
     apply_ai_fixes,
     update_segment_text,
 )
+from app.utils.segment_order import sort_segments
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/validate", tags=["validation"])
+
+
+def _stream_event(event_type: str, **payload) -> str:
+    return json.dumps({"type": event_type, **payload}) + "\n"
 
 
 # ---------------------------------------------------------------------------
@@ -46,7 +54,9 @@ async def validate(request: ValidateRequest, db: Session = Depends(get_db)):
         if not doc:
             raise HTTPException(status_code=404, detail=f"Document '{request.document_id}' not found.")
             
-        db_segments = db.query(SegmentDB).filter(SegmentDB.document_id == request.document_id).all()
+        db_segments = sort_segments(
+            db.query(SegmentDB).filter(SegmentDB.document_id == request.document_id).all()
+        )
         segments_data = [{"id": s.id, "text": s.text} for s in db_segments]
 
         classification = doc.metadata_json.get("classification", {}) if doc.metadata_json else None
@@ -93,6 +103,75 @@ async def validate(request: ValidateRequest, db: Session = Depends(get_db)):
     return results
 
 
+@router.post("/stream")
+async def validate_stream(request: ValidateRequest, db: Session = Depends(get_db)):
+    if not request.document_id:
+        raise HTTPException(status_code=400, detail="Streaming validation requires 'document_id'.")
+
+    doc = db.query(Document).filter(Document.id == request.document_id).first()
+    if not doc:
+        raise HTTPException(status_code=404, detail=f"Document '{request.document_id}' not found.")
+
+    db_segments = sort_segments(
+        db.query(SegmentDB).filter(SegmentDB.document_id == request.document_id).all()
+    )
+    segments_data = [{"id": s.id, "text": s.text, "status": s.status} for s in db_segments]
+    classification = doc.metadata_json.get("classification", {}) if doc.metadata_json else None
+
+    total_segments = sum(
+        1 for segment in segments_data
+        if (segment.get("text", "") or "").strip() and segment.get("status") != "skip"
+    )
+
+    def generate():
+        yield _stream_event(
+            "start",
+            document_id=request.document_id,
+            total_segments=total_segments,
+        )
+
+        completed = 0
+        yielded_results = 0
+
+        for _, result, should_emit in validate_segments_stream(
+            segments=segments_data,
+            auto_fix=request.auto_fix,
+            only_with_issues=True,
+            enable_ai=request.enable_ai,
+            min_issue_severity=request.min_issue_severity,
+            document_context=classification,
+        ):
+            completed += 1
+
+            if should_emit:
+                yielded_results += 1
+                yield _stream_event(
+                    "segment",
+                    document_id=request.document_id,
+                    segment_id=result.get("segment_id"),
+                    index=completed - 1,
+                    result=result,
+                )
+
+            yield _stream_event(
+                "progress",
+                document_id=request.document_id,
+                completed=completed,
+                total=total_segments,
+                invalid_segments=yielded_results,
+            )
+
+        yield _stream_event(
+            "complete",
+            document_id=request.document_id,
+            completed=completed,
+            total=total_segments,
+            invalid_segments=yielded_results,
+        )
+
+    return StreamingResponse(generate(), media_type="application/x-ndjson")
+
+
 # ---------------------------------------------------------------------------
 # POST /validate/apply-fixes — auto-apply AI suggestions
 # ---------------------------------------------------------------------------
@@ -103,7 +182,9 @@ async def apply_fixes(request: ApplyFixesRequest, db: Session = Depends(get_db))
     if not doc:
         raise HTTPException(status_code=404, detail=f"Document '{request.document_id}' not found.")
 
-    db_segments = db.query(SegmentDB).filter(SegmentDB.document_id == request.document_id).all()
+    db_segments = sort_segments(
+        db.query(SegmentDB).filter(SegmentDB.document_id == request.document_id).all()
+    )
     segments_data = [{"id": s.id, "text": s.text, "status": s.status} for s in db_segments]
     
     classification = doc.metadata_json.get("classification", {}) if doc.metadata_json else None
@@ -143,7 +224,9 @@ async def edit_segment(request: EditSegmentRequest, db: Session = Depends(get_db
     if not doc:
         raise HTTPException(status_code=404, detail=f"Document '{request.document_id}' not found.")
 
-    db_segments = db.query(SegmentDB).filter(SegmentDB.document_id == request.document_id).all()
+    db_segments = sort_segments(
+        db.query(SegmentDB).filter(SegmentDB.document_id == request.document_id).all()
+    )
     segments_data = [{"id": s.id, "text": s.text, "status": s.status} for s in db_segments]
 
     result = update_segment_text(

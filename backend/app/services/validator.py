@@ -629,6 +629,96 @@ def validate_segments(
     return results
 
 
+def validate_segments_stream(
+    segments: List[Dict],
+    auto_fix: bool = False,
+    only_with_issues: bool = True,
+    enable_ai: bool = True,
+    min_issue_severity: str = "info",
+    document_context: Optional[Dict] = None,
+    batch_size: int = 20,
+):
+    """
+    Yield per-segment validation results so callers can stream progress.
+
+    Deterministic consistency checks still run across the full document first.
+    AI validation is then processed in batches, and each segment result is yielded
+    as soon as its batch completes.
+    """
+    consistency_results = _deterministic_consistency_issues(segments)
+    threshold = _SEVERITY_ORDER.get(min_issue_severity, 0)
+
+    valid_segments = [
+        seg for seg in segments
+        if (seg.get("text", "") or "").strip() and seg.get("status") != "skip"
+    ]
+
+    if not valid_segments:
+        return
+
+    for i in range(0, len(valid_segments), batch_size):
+        batch = valid_segments[i:i + batch_size]
+
+        ai_results = {}
+        if enable_ai:
+            ai_results = _ai_validate_batch(
+                batch,
+                batch_size=batch_size,
+                document_context=document_context,
+            )
+
+        for seg in batch:
+            seg_id = seg.get("id")
+            text = seg.get("text", "")
+
+            deterministic_issues = _fast_guard(text)
+
+            if enable_ai:
+                raw_ai = ai_results.get(seg_id)
+                if raw_ai is None:
+                    ai_issues = [{
+                        "issue_type": "clarity",
+                        "issue": "AI Validation Batch Failed (API Rate Limit / Timeout). Validation skipped.",
+                        "suggestion": "",
+                        "span": None,
+                        "severity": "error",
+                        "offset": None,
+                        "length": None,
+                        "confidence": 1.0,
+                        "source": "api_system_error",
+                    }]
+                else:
+                    ai_issues = raw_ai
+            else:
+                ai_issues = []
+
+            all_issues = _merge_issues(deterministic_issues, ai_issues)
+            all_issues.extend(consistency_results.get(seg_id, []))
+            all_issues = [
+                issue for issue in all_issues
+                if _SEVERITY_ORDER.get(issue.get("severity", "info"), 0) >= threshold
+            ]
+
+            if seg_id:
+                for issue in all_issues:
+                    issue["segment_id"] = seg_id
+
+            result = {
+                "segment_id": seg_id,
+                "text": text,
+                "issues": all_issues,
+                "auto_fixed_text": _auto_fix(text) if auto_fix else None,
+                "has_errors": any(issue["severity"] == "error" for issue in all_issues),
+                "has_warnings": any(issue["severity"] == "warning" for issue in all_issues),
+            }
+
+            if only_with_issues and not result["issues"]:
+                yield seg_id, result, False
+                continue
+
+            yield seg_id, result, True
+
+
 # ===========================================================================
 # Segment text operations (for user edits & AI auto-fix)
 # ===========================================================================

@@ -60,11 +60,12 @@ import {
   getExportStatus,
   getSegments,
   getShareOverview,
-  translateDocument,
+  streamTranslateDocument,
   type ExportFormat,
   type ExportStatusResponse,
   type Segment,
   type ShareOverviewResponse,
+  type TranslationStreamEvent,
 } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
@@ -191,6 +192,26 @@ function normalizeSegment(
 
 function getStatusParam(statusFilter: StatusFilter) {
   return statusFilter === "all" ? undefined : statusFilter;
+}
+
+function matchesStatusFilter(
+  segment: Pick<Segment, "status">,
+  statusFilter: StatusFilter,
+) {
+  return statusFilter === "all" || segment.status === statusFilter;
+}
+
+function applyWorkspaceOverridesToSegment(
+  segment: Segment,
+  sourceOverrides: Record<string, string>,
+  outputOverrides: Record<string, string>,
+): WorkspaceSegment {
+  return {
+    ...segment,
+    source_text: sourceOverrides[segment.segment_id] ?? segment.source_text,
+    final_text: outputOverrides[segment.segment_id] ?? segment.final_text,
+    sourceEdited: Boolean(sourceOverrides[segment.segment_id]),
+  };
 }
 
 function getUserInitials(name?: string | null, email?: string | null) {
@@ -720,7 +741,13 @@ function TranslatePageContent() {
   const [outputOverrides, setOutputOverrides] = useState<
     Record<string, string>
   >({});
+  const [streamProgress, setStreamProgress] = useState<{
+    completed: number;
+    total: number;
+    translated: number;
+  }>({ completed: 0, total: 0, translated: 0 });
   const loadMoreRef = useRef<HTMLDivElement | null>(null);
+  const streamControllerRef = useRef<AbortController | null>(null);
   // Keep a ref to the current targetLang so memoized SegmentRow callbacks
   // always read the latest value (avoids stale closure in handleRetry).
   
@@ -728,6 +755,12 @@ function TranslatePageContent() {
   useEffect(() => {
     targetLangRef.current = targetLang;
   }, [targetLang]);
+
+  useEffect(() => {
+    return () => {
+      streamControllerRef.current?.abort();
+    };
+  }, []);
 
   const filteredSegments = useMemo(() => {
     const query = searchQuery.trim().toLowerCase();
@@ -792,6 +825,17 @@ function TranslatePageContent() {
     });
   }, [docId, outputOverrides, sourceOverrides]);
 
+  useEffect(() => {
+    setSegments((prev) =>
+      prev.map((segment) => ({
+        ...segment,
+        source_text: sourceOverrides[segment.segment_id] ?? segment.source_text,
+        final_text: outputOverrides[segment.segment_id] ?? segment.final_text,
+        sourceEdited: Boolean(sourceOverrides[segment.segment_id]),
+      })),
+    );
+  }, [outputOverrides, sourceOverrides]);
+
   const loadSegments = async (
     nextStatusFilter: StatusFilter = statusFilter,
   ) => {
@@ -813,13 +857,13 @@ function TranslatePageContent() {
           ),
         )
         .filter(isVisibleSegment)
-        .map((segment) => ({
-          ...segment,
-          source_text:
-            sourceOverrides[segment.segment_id] ?? segment.source_text,
-          final_text: outputOverrides[segment.segment_id] ?? segment.final_text,
-          sourceEdited: Boolean(sourceOverrides[segment.segment_id]),
-        }));
+        .map((segment) =>
+          applyWorkspaceOverridesToSegment(
+            segment,
+            sourceOverrides,
+            outputOverrides,
+          ),
+        );
 
       setSegments(normalizedSegments);
     } catch {
@@ -837,7 +881,7 @@ function TranslatePageContent() {
 
   useEffect(() => {
     void loadSegments(statusFilter);
-  }, [docId, outputOverrides, sourceOverrides, statusFilter]);
+  }, [docId, statusFilter]);
 
   useEffect(() => {
     setVisibleCount(INITIAL_SEGMENT_BATCH);
@@ -880,45 +924,146 @@ function TranslatePageContent() {
     getExportStatus(docId)
       .then((data) => setExportStatus(data))
       .catch(() => setExportStatus(null));
-  }, [docId, segments]);
+  }, [docId]);
 
-
-  const refreshSingleSegment = async (segmentId: string) => {
-    const refreshed = (await getSegments(docId, getStatusParam(statusFilter)))
-      .map((segment, index) =>
-        normalizeSegment(
-          segment as Partial<Segment> & Record<string, unknown>,
-          index,
-        ),
-      )
-      .filter(isVisibleSegment);
-    const nextSegment = refreshed.find(
-      (segment) => segment.segment_id === segmentId,
+  const applyStreamedSegment = (
+    rawSegment: Record<string, unknown>,
+    nextStatusFilter: StatusFilter,
+  ) => {
+    const normalizedSegment = normalizeSegment(
+      rawSegment as Partial<Segment> & Record<string, unknown>,
+      0,
     );
 
-    if (!nextSegment) {
+    if (!isVisibleSegment(normalizedSegment)) {
       setSegments((prev) =>
-        prev.filter((segment) => segment.segment_id !== segmentId),
+        prev.filter(
+          (segment) => segment.segment_id !== normalizedSegment.segment_id,
+        ),
       );
       return;
     }
 
-    setSegments((prev) =>
-      prev.map((segment) =>
-        segment.segment_id === segmentId
-          ? {
-              ...nextSegment,
-              source_text:
-                sourceOverrides[nextSegment.segment_id] ??
-                nextSegment.source_text,
-              final_text:
-                outputOverrides[nextSegment.segment_id] ??
-                nextSegment.final_text,
-              sourceEdited: Boolean(sourceOverrides[nextSegment.segment_id]),
-            }
-          : segment,
-      ),
+    if (!matchesStatusFilter(normalizedSegment, nextStatusFilter)) {
+      setSegments((prev) =>
+        prev.filter(
+          (segment) => segment.segment_id !== normalizedSegment.segment_id,
+        ),
+      );
+      return;
+    }
+
+    const nextSegment = applyWorkspaceOverridesToSegment(
+      normalizedSegment,
+      sourceOverrides,
+      outputOverrides,
     );
+
+    setSegments((prev) => {
+      const existingIndex = prev.findIndex(
+        (segment) => segment.segment_id === nextSegment.segment_id,
+      );
+
+      if (existingIndex >= 0) {
+        const next = [...prev];
+        next[existingIndex] = nextSegment;
+        return next;
+      }
+
+      return [...prev, nextSegment];
+    });
+  };
+
+  const startTranslationStream = async (
+    segmentIds: string[],
+    options?: { isRetry?: boolean; retrySegmentId?: string },
+  ) => {
+    streamControllerRef.current?.abort();
+    const controller = new AbortController();
+    streamControllerRef.current = controller;
+
+    setTranslating(true);
+    setTranslationMessage(null);
+    setStreamProgress({ completed: 0, total: segmentIds.length, translated: 0 });
+    let latestTranslated = 0;
+    let latestTotal = segmentIds.length;
+
+    try {
+      await streamTranslateDocument(
+        docId,
+        targetLangRef.current,
+        [],
+        segmentIds,
+        (event: TranslationStreamEvent) => {
+          if (event.type === "start") {
+            latestTotal = event.total_segments;
+            setStreamProgress({
+              completed: 0,
+              total: event.total_segments,
+              translated: 0,
+            });
+            return;
+          }
+
+          if (event.type === "segment") {
+            applyStreamedSegment(event.segment, statusFilter);
+            return;
+          }
+
+          if (event.type === "progress" || event.type === "complete") {
+            latestTranslated = event.translated;
+            latestTotal = event.total;
+            setStreamProgress({
+              completed: event.completed,
+              total: event.total,
+              translated: event.translated,
+            });
+          }
+        },
+        controller.signal,
+      );
+
+      setSelectedIds((prev) => {
+        if (options?.isRetry) return prev;
+        const next = new Set(prev);
+        for (const segmentId of segmentIds) {
+          next.delete(segmentId);
+        }
+        return next;
+      });
+      const exportData = await getExportStatus(docId).catch(() => null);
+      setExportStatus(exportData);
+      setTranslationMessage(
+        options?.isRetry
+          ? "Selected segment retranslated."
+          : `${latestTranslated} of ${latestTotal} selected segment${latestTotal === 1 ? "" : "s"} translated.`,
+      );
+    } catch {
+      if (controller.signal.aborted) {
+        return;
+      }
+
+      setTranslationMessage(
+        options?.isRetry
+          ? "Segment retranslation failed. Please try again."
+          : "Translation failed. Please try again.",
+      );
+      toast({
+        title: options?.isRetry ? "Retry failed" : "Translation failed",
+        description: options?.isRetry
+          ? "The segment could not be retranslated right now."
+          : "Could not run translation. Ensure the backend is running and the API URL is configured correctly.",
+        variant: "destructive",
+      });
+    } finally {
+      if (streamControllerRef.current === controller) {
+        streamControllerRef.current = null;
+      }
+      setTranslating(false);
+      if (options?.retrySegmentId) {
+        setRetryingId(null);
+      }
+    }
   };
 
   const handleTranslate = async () => {
@@ -938,28 +1083,7 @@ function TranslatePageContent() {
       return;
     }
 
-    setTranslating(true);
-    setTranslationMessage(null);
-
-    try {
-      const data = await translateDocument(docId, targetLang, [], segmentIds);
-      await loadSegments(statusFilter);
-      const exportData = await getExportStatus(docId).catch(() => null);
-      setExportStatus(exportData);
-      setTranslationMessage(
-        `${data.segments_translated} selected segment${data.segments_translated === 1 ? "" : "s"} translated`,
-      );
-    } catch (error) {
-      setTranslationMessage("Translation failed. Please try again.");
-      toast({
-        title: "Translation failed",
-        description:
-          "Could not run translation. Ensure the backend is running and the API URL is configured correctly.",
-        variant: "destructive",
-      });
-    } finally {
-      setTranslating(false);
-    }
+    await startTranslationStream(segmentIds);
   };
 
   const handleRetry = async (segment: WorkspaceSegment) => {
@@ -970,22 +1094,10 @@ function TranslatePageContent() {
     }
 
     setRetryingId(segment.segment_id);
-    try {
-      await translateDocument(docId, targetLangRef.current, [], [segment.segment_id]);
-      await refreshSingleSegment(segment.segment_id);
-      const exportData = await getExportStatus(docId).catch(() => null);
-      setExportStatus(exportData);
-      setTranslationMessage("Selected segment retranslated.");
-    } catch {
-      setTranslationMessage("Segment retranslation failed. Please try again.");
-      toast({
-        title: "Retry failed",
-        description: "The segment could not be retranslated right now.",
-        variant: "destructive",
-      });
-    } finally {
-      setRetryingId(null);
-    }
+    await startTranslationStream([segment.segment_id], {
+      isRetry: true,
+      retrySegmentId: segment.segment_id,
+    });
   };
 
   const handleExport = async () => {
@@ -1603,13 +1715,28 @@ function TranslatePageContent() {
                       Translating... this may take a moment for large documents.
                     </p>
                     <p className="mt-1 text-sm text-muted-foreground">
-                      Keep this page open while the segments are translated and
-                      refreshed.
+                      {streamProgress.total > 0
+                        ? `${streamProgress.completed} of ${streamProgress.total} segments processed, ${streamProgress.translated} translated so far.`
+                        : "Keep this page open while the segments are translated and refreshed."}
                     </p>
                   </div>
                 </div>
                 <div className="mt-4 h-2.5 overflow-hidden rounded-full bg-primary/10">
-                  <div className="h-full w-1/3 animate-pulse rounded-full bg-gradient-to-r from-primary via-sky-400 to-cyan-400" />
+                  <div
+                    className="h-full rounded-full bg-gradient-to-r from-primary via-sky-400 to-cyan-400 transition-all duration-300"
+                    style={{
+                      width:
+                        streamProgress.total > 0
+                          ? `${Math.max(
+                              6,
+                              Math.round(
+                                (streamProgress.completed / streamProgress.total) *
+                                  100,
+                              ),
+                            )}%`
+                          : "20%",
+                    }}
+                  />
                 </div>
               </div>
             )}

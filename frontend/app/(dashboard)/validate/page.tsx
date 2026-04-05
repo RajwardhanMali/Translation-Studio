@@ -1,6 +1,6 @@
 'use client'
 
-import { Suspense, useEffect, useMemo, useState } from 'react'
+import { Suspense, useEffect, useMemo, useRef, useState } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
 import { useRouter, useSearchParams } from 'next/navigation'
 import { AlertTriangle, ArrowRight, CheckCircle2, ChevronDown, ChevronUp, Info, RefreshCw, ShieldCheck, Wand2 } from 'lucide-react'
@@ -15,7 +15,7 @@ import { useToast } from '@/hooks/use-toast'
 import {
   applyValidationFixes,
   editValidationSegment,
-  validateDocument,
+  streamValidateDocument,
   type ValidationIssue,
   type ValidationResult,
 } from '@/lib/api'
@@ -189,9 +189,18 @@ function ValidationPageContent() {
   const [showInfo, setShowInfo] = useState(false)
   const [applyingAiId, setApplyingAiId] = useState<string | null>(null)
   const [manualEditId, setManualEditId] = useState<string | null>(null)
+  const [progress, setProgress] = useState({ completed: 0, total: 0, invalidSegments: 0 })
+  const streamControllerRef = useRef<AbortController | null>(null)
+  const resultOrderRef = useRef<Record<string, number>>({})
 
   const loadValidation = async (autoFix = true) => {
+    streamControllerRef.current?.abort()
+    const controller = new AbortController()
+    streamControllerRef.current = controller
+
     setLoading(true)
+    setProgress({ completed: 0, total: 0, invalidSegments: 0 })
+    resultOrderRef.current = {}
 
     if (!docId) {
       setResults([])
@@ -201,10 +210,53 @@ function ValidationPageContent() {
     }
 
     try {
-      const data = await validateDocument(docId, autoFix)
-      setResults(data)
+      setResults([])
       setHasLoaded(true)
-    } catch {
+      await streamValidateDocument(
+        docId,
+        autoFix,
+        (event) => {
+          if (event.type === 'start') {
+            setProgress({ completed: 0, total: event.total_segments, invalidSegments: 0 })
+            return
+          }
+
+          if (event.type === 'segment') {
+            if (event.result.segment_id) {
+              resultOrderRef.current[event.result.segment_id] = event.index
+            }
+            setResults((prev) => {
+              const next = [...prev]
+              const existingIndex = next.findIndex((item) => item.segment_id === event.result.segment_id)
+              if (existingIndex >= 0) {
+                next[existingIndex] = event.result
+              } else {
+                next.push(event.result)
+              }
+              next.sort(
+                (left, right) =>
+                  (resultOrderRef.current[left.segment_id ?? ''] ?? Number.MAX_SAFE_INTEGER) -
+                  (resultOrderRef.current[right.segment_id ?? ''] ?? Number.MAX_SAFE_INTEGER)
+              )
+              return next
+            })
+            return
+          }
+
+          if (event.type === 'progress' || event.type === 'complete') {
+            setProgress({
+              completed: event.completed,
+              total: event.total,
+              invalidSegments: event.invalid_segments,
+            })
+          }
+        },
+        controller.signal
+      )
+    } catch (error) {
+      if (controller.signal.aborted) {
+        return
+      }
       toast({
         title: 'Validation failed',
         description: 'Could not validate the document. Ensure the backend is running and the API URL is configured correctly.',
@@ -213,12 +265,18 @@ function ValidationPageContent() {
       setResults([])
       setHasLoaded(true)
     } finally {
-      setLoading(false)
+      if (streamControllerRef.current === controller) {
+        setLoading(false)
+        streamControllerRef.current = null
+      }
     }
   }
 
   useEffect(() => {
     void loadValidation(true)
+    return () => {
+      streamControllerRef.current?.abort()
+    }
   }, [docId])
 
   const counts = useMemo(
@@ -337,10 +395,12 @@ function ValidationPageContent() {
           ))}
         </div>
 
-        {loading ? (
+        {loading && results.length === 0 ? (
           <div className="glass-panel flex flex-col items-center gap-4 rounded-3xl py-24">
             <Spinner className="h-8 w-8 text-primary" />
-            <p className="text-sm text-muted-foreground">Checking document...</p>
+            <p className="text-sm text-muted-foreground">
+              Checking document... {progress.total > 0 ? `${progress.completed}/${progress.total}` : ''}
+            </p>
           </div>
         ) : hasLoaded && results.length === 0 ? (
           <Card className="glass-panel flex flex-col items-center gap-3 rounded-3xl py-16 text-center">
@@ -351,9 +411,16 @@ function ValidationPageContent() {
         ) : hasLoaded ? (
           <div className="space-y-4">
             <Reveal className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-border/70 bg-background/70 px-4 py-3">
-              <p className="text-sm text-foreground">
-                {results.length} segment{results.length === 1 ? '' : 's'} need attention.
-              </p>
+              <div className="space-y-1">
+                <p className="text-sm text-foreground">
+                  {results.length} segment{results.length === 1 ? '' : 's'} need attention.
+                </p>
+                {loading && progress.total > 0 ? (
+                  <p className="text-xs text-muted-foreground">
+                    Validated {progress.completed} of {progress.total} segments so far.
+                  </p>
+                ) : null}
+              </div>
               {counts.info > 0 && (
                 <button className="text-sm font-medium text-primary hover:underline" onClick={() => setShowInfo((value) => !value)}>
                   {showInfo ? 'Hide info items' : `Show info items (${counts.info})`}
