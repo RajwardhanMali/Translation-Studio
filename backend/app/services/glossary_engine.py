@@ -1,31 +1,77 @@
 """
 Glossary engine.
-Loads glossary from JSON, injects terms into LLM prompts,
+Loads glossary from Postgres, injects terms into LLM prompts,
 and post-processes translations to enforce glossary constraints.
-
-v2 changes:
-  - Domain-scoped filtering: when document domain is known, only matching
-    glossary terms (or universal terms with no domain) are applied.
-  - Word-boundary matching: fixes the substring match bug where "data"
-    was matching inside "database". Now uses regex word boundaries.
 """
 
 import re
 import logging
+import time
+from copy import deepcopy
+from threading import Lock
 from typing import List, Dict, Optional, Tuple
 
-from app.utils.file_handler import load_glossary, save_glossary
+from app.database import SessionLocal
+from app.models.domain import GlossaryTerm
 
 logger = logging.getLogger(__name__)
+
+
+_GLOSSARY_CACHE_TTL_SECONDS = 300
+_GLOSSARY_CACHE_LOCK = Lock()
+_GLOSSARY_CACHE: Optional[Dict] = None
+_GLOSSARY_CACHE_TS = 0.0
+
+
+def _build_glossary_payload(terms: List[GlossaryTerm]) -> Dict:
+    terms_list = []
+    for t in terms:
+        terms_list.append({
+            "id": t.id,
+            "source": t.source,
+            "target": t.target,
+            "language": t.language,
+            "domain": t.domain,
+            "notes": t.notes,
+        })
+    return {
+        "terms": terms_list,
+        "style_rules": [],  # Style rules are not modeled in Phase 1 DB migration
+    }
+
+
+def _invalidate_glossary_cache() -> None:
+    global _GLOSSARY_CACHE, _GLOSSARY_CACHE_TS
+    with _GLOSSARY_CACHE_LOCK:
+        _GLOSSARY_CACHE = None
+        _GLOSSARY_CACHE_TS = 0.0
 
 
 # ---------------------------------------------------------------------------
 # Load / save
 # ---------------------------------------------------------------------------
 
-def get_glossary() -> Dict:
-    """Return the current glossary dict."""
-    return load_glossary()
+def get_glossary(force_refresh: bool = False) -> Dict:
+    """Return the current glossary dict from database."""
+    global _GLOSSARY_CACHE, _GLOSSARY_CACHE_TS
+    now = time.time()
+    if not force_refresh:
+        with _GLOSSARY_CACHE_LOCK:
+            if _GLOSSARY_CACHE is not None and (now - _GLOSSARY_CACHE_TS) < _GLOSSARY_CACHE_TTL_SECONDS:
+                return deepcopy(_GLOSSARY_CACHE)
+
+    db = SessionLocal()
+    try:
+        terms = db.query(GlossaryTerm).all()
+        payload = _build_glossary_payload(terms)
+    finally:
+        db.close()
+
+    with _GLOSSARY_CACHE_LOCK:
+        _GLOSSARY_CACHE = payload
+        _GLOSSARY_CACHE_TS = now
+
+    return deepcopy(payload)
 
 
 def add_term(term: Dict) -> Dict:
@@ -33,26 +79,35 @@ def add_term(term: Dict) -> Dict:
     Add a new term to the glossary.
     Replaces if source+language already exists.
     """
-    glossary = load_glossary()
-    terms    = glossary.get("terms", [])
+    db = SessionLocal()
+    try:
+        existing = db.query(GlossaryTerm).filter(
+            GlossaryTerm.source == term["source"],
+            GlossaryTerm.language == term.get("language", "fr")
+        ).first()
 
-    # Check for duplicate
-    for i, existing in enumerate(terms):
-        if (
-            existing["source"].lower() == term["source"].lower()
-            and existing.get("language", "fr") == term.get("language", "fr")
-        ):
-            terms[i] = term   # update in-place
+        if existing:
+            existing.target = term["target"]
+            existing.domain = term.get("domain")
+            existing.notes = term.get("notes")
             logger.info(f"Updated glossary term: '{term['source']}'")
-            glossary["terms"] = terms
-            save_glossary(glossary)
-            return glossary
+        else:
+            new_term = GlossaryTerm(
+                source=term["source"],
+                target=term["target"],
+                language=term.get("language", "fr"),
+                domain=term.get("domain"),
+                notes=term.get("notes")
+            )
+            db.add(new_term)
+            logger.info(f"Added glossary term: '{term['source']}'")
 
-    terms.append(term)
-    glossary["terms"] = terms
-    save_glossary(glossary)
-    logger.info(f"Added glossary term: '{term['source']}'")
-    return glossary
+        db.commit()
+    finally:
+        db.close()
+
+    _invalidate_glossary_cache()
+    return get_glossary(force_refresh=True)
 
 
 # ---------------------------------------------------------------------------
@@ -60,10 +115,6 @@ def add_term(term: Dict) -> Dict:
 # ---------------------------------------------------------------------------
 
 def _term_matches_source(term_source: str, source_text: str) -> bool:
-    """
-    Check if a glossary term's source appears in the text using word-boundary
-    matching. This prevents "data" from matching inside "database".
-    """
     pattern = re.compile(r"\b" + re.escape(term_source) + r"\b", re.IGNORECASE)
     return bool(pattern.search(source_text))
 
@@ -73,30 +124,16 @@ def _filter_terms_by_domain(
     target_language: str,
     document_domain: Optional[str] = None,
 ) -> List[Dict]:
-    """
-    Filter glossary terms by language and optionally by domain.
-    
-    Rules:
-    - Terms with matching language are always considered.
-    - If document_domain is set:
-      - Terms with matching domain are included.
-      - Terms with no domain (universal) are included.
-      - Terms with a DIFFERENT domain are excluded.
-    - If document_domain is None, all language-matching terms are included.
-    """
     filtered = []
     for t in terms:
         if t.get("language", "fr") != target_language:
             continue
         
         term_domain = t.get("domain")
-        
         if document_domain and term_domain:
-            # Both document and term have domains — must match
             if term_domain.lower() != document_domain.lower():
                 continue
         
-        # Either no domain filter, or domains match, or term is universal
         filtered.append(t)
     
     return filtered
@@ -107,18 +144,11 @@ def build_glossary_prompt_fragment(
     target_language: str,
     document_domain: Optional[str] = None,
 ) -> str:
-    """
-    Build a glossary fragment to inject into the LLM system prompt.
-    Only includes terms whose source appears in the source_text (word-boundary match).
-    Optionally filters by document domain.
-    """
     glossary = get_glossary()
     all_terms = glossary.get("terms", [])
     
-    # Filter by language and domain
     domain_filtered = _filter_terms_by_domain(all_terms, target_language, document_domain)
     
-    # Filter by presence in source text (word-boundary match)
     relevant_terms = [
         t for t in domain_filtered
         if _term_matches_source(t["source"], source_text)
@@ -137,7 +167,6 @@ def build_glossary_prompt_fragment(
 
 
 def get_style_rules() -> List[str]:
-    """Return current style rules from glossary file."""
     return get_glossary().get("style_rules", [])
 
 
@@ -151,18 +180,9 @@ def enforce_glossary(
     target_language: str,
     document_domain: Optional[str] = None,
 ) -> Tuple[str, List[Dict]]:
-    """
-    Detect glossary violations in a translated text and auto-correct them.
-    Uses word-boundary matching to prevent substring false positives.
-    Optionally filters by document domain.
-
-    Returns:
-        (corrected_text, list_of_violations)
-    """
     glossary = get_glossary()
     all_terms = glossary.get("terms", [])
     
-    # Filter by language and domain
     terms = _filter_terms_by_domain(all_terms, target_language, document_domain)
     
     violations: List[Dict] = []
@@ -172,11 +192,9 @@ def enforce_glossary(
         source = term["source"]
         target = term["target"]
         
-        # Only process if source term appears in original source (word-boundary)
         if not _term_matches_source(source, source_text):
             continue
 
-        # Check if target translation is present (word-boundary); if not — flag it
         target_pattern = re.compile(r"\b" + re.escape(target) + r"\b", re.IGNORECASE)
         if not target_pattern.search(corrected):
             violations.append({
@@ -185,7 +203,6 @@ def enforce_glossary(
                 "severity":     "error",
                 "note":         f"Glossary term '{source}' not translated as '{target}'",
             })
-            # Attempt word-boundary substitution for the untranslated source word
             corrected = re.sub(
                 r"\b" + re.escape(source) + r"\b",
                 target,

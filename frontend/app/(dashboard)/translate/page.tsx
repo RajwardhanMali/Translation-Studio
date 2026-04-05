@@ -1,6 +1,7 @@
 "use client";
 
 import { memo, Suspense, useEffect, useMemo, useRef, useState } from "react";
+import { useAuth } from "@clerk/nextjs";
 import { AnimatePresence, motion } from "framer-motion";
 import { useSearchParams, useRouter } from "next/navigation";
 import {
@@ -22,7 +23,7 @@ import {
   WandSparkles,
   X,
 } from "lucide-react";
-import { AppShell } from "@/components/app-shell";
+import { LayoutHeader } from "@/components/layout-context";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -54,16 +55,23 @@ import { Textarea } from "@/components/ui/textarea";
 import { useToast } from "@/hooks/use-toast";
 import {
   approveSegment,
+  approveSegmentsBatch,
+  assignSegments,
+  claimSegments,
   createShareLink,
   downloadExport,
+  getCollaborationPresenceWebSocketUrl,
+  getDocumentCollaborators,
   getExportStatus,
   getSegments,
-  getShareOverview,
-  translateDocument,
+  streamTranslateDocument,
+  type CollaboratorRole,
+  type DocumentCollaboratorsResponse,
+  type DocumentPresenceResponse,
   type ExportFormat,
   type ExportStatusResponse,
   type Segment,
-  type ShareOverviewResponse,
+  type TranslationStreamEvent,
 } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
@@ -185,11 +193,41 @@ function normalizeSegment(
         : null,
     row: typeof raw.row === "number" ? raw.row : null,
     col: typeof raw.col === "number" ? raw.col : null,
+    assigned_to_clerk_user_id:
+      typeof raw.assigned_to_clerk_user_id === "string"
+        ? raw.assigned_to_clerk_user_id
+        : null,
+    assigned_to_name:
+      typeof raw.assigned_to_name === "string" ? raw.assigned_to_name : null,
+    assigned_to_email:
+      typeof raw.assigned_to_email === "string"
+        ? raw.assigned_to_email
+        : null,
   };
 }
 
 function getStatusParam(statusFilter: StatusFilter) {
   return statusFilter === "all" ? undefined : statusFilter;
+}
+
+function matchesStatusFilter(
+  segment: Pick<Segment, "status">,
+  statusFilter: StatusFilter,
+) {
+  return statusFilter === "all" || segment.status === statusFilter;
+}
+
+function applyWorkspaceOverridesToSegment(
+  segment: Segment,
+  sourceOverrides: Record<string, string>,
+  outputOverrides: Record<string, string>,
+): WorkspaceSegment {
+  return {
+    ...segment,
+    source_text: sourceOverrides[segment.segment_id] ?? segment.source_text,
+    final_text: outputOverrides[segment.segment_id] ?? segment.final_text,
+    sourceEdited: Boolean(sourceOverrides[segment.segment_id]),
+  };
 }
 
 function getUserInitials(name?: string | null, email?: string | null) {
@@ -300,7 +338,14 @@ interface SegmentRowProps {
   onUpdateOutput: (segmentId: string, finalText: string) => void;
   onUpdateSource: (segmentId: string, sourceText: string) => void;
   onRetry: (segment: WorkspaceSegment) => Promise<void>;
+  onStartEdit: (segment: WorkspaceSegment) => Promise<boolean>;
+  onFinishEdit: (segment: WorkspaceSegment) => Promise<void>;
   retrying: boolean;
+  canModifyWorkspace: boolean;
+  canApproveSegments: boolean;
+  currentUserId: string | null | undefined;
+  canOperateSegment: boolean;
+  canApproveSegment: boolean;
 }
 
 const INITIAL_SEGMENT_BATCH = 24;
@@ -315,7 +360,14 @@ const SegmentRow = memo(
     onUpdateOutput,
     onUpdateSource,
     onRetry,
+    onStartEdit,
+    onFinishEdit,
     retrying,
+    canModifyWorkspace,
+    canApproveSegments,
+    currentUserId,
+    canOperateSegment,
+    canApproveSegment,
   }: SegmentRowProps) {
     const [editingMode, setEditingMode] = useState<
       "none" | "source" | "output"
@@ -332,7 +384,7 @@ const SegmentRow = memo(
       setOutputValue(getSegmentOutputText(segment));
     }, [segment.source_text, segment.final_text, segment.translated_text]);
 
-    const canApprove = hasTranslatedOutput(segment);
+    const canApprove = canApproveSegment && hasTranslatedOutput(segment);
     const isApproved = segment.status === "approved";
 
     const statusAccentMap: Record<string, string> = {
@@ -349,25 +401,30 @@ const SegmentRow = memo(
       setApproving(false);
     };
 
-    const handleEditSource = () => {
-      if (isApproved) return;
+    const handleEditSource = async () => {
+      if (isApproved || !canModifyWorkspace) return;
+      const allowed = await onStartEdit(segment);
+      if (!allowed) return;
       setSourceValue(segment.source_text);
       setEditingMode("source");
     };
 
-    const handleEditOutput = () => {
-      if (isApproved) return;
+    const handleEditOutput = async () => {
+      if (isApproved || !canModifyWorkspace) return;
+      const allowed = await onStartEdit(segment);
+      if (!allowed) return;
       setOutputValue(getSegmentOutputText(segment));
       setEditingMode("output");
     };
 
-    const handleCancel = () => {
+    const handleCancel = async () => {
       setSourceValue(segment.source_text);
       setOutputValue(getSegmentOutputText(segment));
       setEditingMode("none");
+      await onFinishEdit(segment);
     };
 
-    const handleSave = () => {
+    const handleSave = async () => {
       if (editingMode === "source") {
         onUpdateSource(segment.segment_id, sourceValue);
       }
@@ -377,6 +434,7 @@ const SegmentRow = memo(
       }
 
       setEditingMode("none");
+      await onFinishEdit(segment);
     };
 
     const isHeading = segment.type === "heading";
@@ -414,7 +472,7 @@ const SegmentRow = memo(
               type="checkbox"
               checked={selected}
               onChange={() => onSelect(segment.segment_id)}
-              disabled={isApproved}
+              disabled={isApproved || !canModifyWorkspace}
               className="h-4 w-4 rounded accent-primary"
             />
             <div className="min-w-0">
@@ -424,6 +482,24 @@ const SegmentRow = memo(
               <div className="mt-1 flex flex-wrap items-center gap-2">
                 <StatusPill status={segment.status} />
                 <TmMatchBadge tmMatchType={segment.tm_match_type} />
+                {segment.assigned_to_clerk_user_id ? (
+                  <Badge
+                    variant="outline"
+                    className="rounded-full text-[10px] font-semibold"
+                  >
+                    {segment.assigned_to_clerk_user_id === currentUserId
+                      ? "Assigned to you"
+                      : `Assigned: ${segment.assigned_to_name || segment.assigned_to_email || "teammate"}`}
+                  </Badge>
+                ) : (
+                  <Badge
+                    variant="outline"
+                    className="rounded-full border-amber-300/80 text-[10px] font-semibold text-amber-700 dark:border-amber-900/70 dark:text-amber-200"
+                  >
+                    Unassigned
+                  </Badge>
+                )}
+
                 {isHeading && (
                   <Badge
                     variant="outline"
@@ -481,7 +557,7 @@ const SegmentRow = memo(
                     size="sm"
                     variant="outline"
                     onClick={() => void onRetry(segment)}
-                    disabled={retrying}
+                    disabled={retrying || !canOperateSegment}
                     className="rounded-xl"
                   >
                     {retrying ? (
@@ -538,15 +614,16 @@ const SegmentRow = memo(
                 autoFocus
               />
             ) : (
-              <p
-                onDoubleClick={handleEditSource}
-                className={cn(
-                  "break-words text-foreground",
+                  <p
+                    onDoubleClick={handleEditSource}
+                    className={cn(
+                      "break-words text-foreground",
                   sourceTextClass,
                   !isApproved &&
+                    canOperateSegment &&
                     "cursor-text rounded-xl transition-colors hover:bg-muted/35 hover:px-2 hover:py-1",
-                )}
-              >
+                    )}
+                  >
                 {segment.source_text}
               </p>
             )}
@@ -592,6 +669,7 @@ const SegmentRow = memo(
                   "break-words",
                   outputTextClass,
                   !isApproved &&
+                    canOperateSegment &&
                     "cursor-text rounded-xl transition-colors hover:bg-muted/35 hover:px-2 hover:py-1",
                   isTranslationError(segment.translated_text)
                     ? "text-red-700 dark:text-red-300"
@@ -685,6 +763,7 @@ function TranslatePageContent() {
   const searchParams = useSearchParams();
   const router = useRouter();
   const { toast } = useToast();
+  const { userId } = useAuth();
   const docId = searchParams.get("doc") ?? "";
 
   const [segments, setSegments] = useState<WorkspaceSegment[]>([]);
@@ -700,11 +779,6 @@ function TranslatePageContent() {
   const [exportStatus, setExportStatus] = useState<ExportStatusResponse | null>(
     null,
   );
-  const [shareOverview, setShareOverview] = useState<ShareOverviewResponse>({
-    ownedByDocument: {},
-    visibleByDocument: {},
-    receivedDocumentIds: [],
-  });
   const [exportFormat, setExportFormat] = useState<ExportFormat>("same");
   const [exporting, setExporting] = useState(false);
   const [visibleCount, setVisibleCount] = useState(INITIAL_SEGMENT_BATCH);
@@ -717,13 +791,86 @@ function TranslatePageContent() {
     field: "source" | "output";
     value: string;
   } | null>(null);
+  const [selectedAssignee, setSelectedAssignee] = useState<string>("");
   const [sourceOverrides, setSourceOverrides] = useState<
     Record<string, string>
   >({});
   const [outputOverrides, setOutputOverrides] = useState<
     Record<string, string>
   >({});
+  const [currentRole, setCurrentRole] = useState<CollaboratorRole | null>(null);
+  const [collaboratorData, setCollaboratorData] =
+    useState<DocumentCollaboratorsResponse | null>(null);
+  const [presenceData, setPresenceData] =
+    useState<DocumentPresenceResponse | null>(null);
+  const [accessLoading, setAccessLoading] = useState(true);
+  const [accessDenied, setAccessDenied] = useState<string | null>(null);
+  const [streamProgress, setStreamProgress] = useState<{
+    completed: number;
+    total: number;
+    translated: number;
+  }>({ completed: 0, total: 0, translated: 0 });
   const loadMoreRef = useRef<HTMLDivElement | null>(null);
+  const streamControllerRef = useRef<AbortController | null>(null);
+  // Keep a ref to the current targetLang so memoized SegmentRow callbacks
+  // always read the latest value (avoids stale closure in handleRetry).
+  
+  const targetLangRef = useRef(targetLang);
+  useEffect(() => {
+    targetLangRef.current = targetLang;
+  }, [targetLang]);
+
+  const canModifyWorkspace =
+    currentRole === "owner" || currentRole === "editor";
+  const canApproveSegments =
+    currentRole === "owner" || currentRole === "editor";
+  const assignableCollaborators = useMemo(
+    () =>
+      (collaboratorData?.collaborators ?? []).filter(
+        (collaborator) => collaborator.role === "editor",
+      ),
+    [collaboratorData],
+  );
+
+  useEffect(() => {
+    if (currentRole !== "owner") return;
+    if (assignableCollaborators.length === 0) {
+      if (selectedAssignee) {
+        setSelectedAssignee("");
+      }
+      return;
+    }
+
+    const selectedStillValid = assignableCollaborators.some(
+      (collaborator) =>
+        collaborator.collaboratorClerkUserId === selectedAssignee,
+    );
+
+    if (!selectedStillValid) {
+      setSelectedAssignee(assignableCollaborators[0].collaboratorClerkUserId);
+    }
+  }, [assignableCollaborators, currentRole, selectedAssignee]);
+
+
+
+  const canOperateSegment = (segment: WorkspaceSegment) => {
+    if (!canModifyWorkspace) return false;
+    if (currentRole === "owner") return true;
+    return segment.assigned_to_clerk_user_id === userId;
+  };
+
+  const canApproveSegment = (segment: WorkspaceSegment) => {
+    if (!canApproveSegments) return false;
+    if (currentRole === "owner") return true;
+    return segment.assigned_to_clerk_user_id === userId;
+  };
+
+  useEffect(() => {
+    return () => {
+      streamControllerRef.current?.abort();
+    };
+  }, []);
+
   const filteredSegments = useMemo(() => {
     const query = searchQuery.trim().toLowerCase();
     if (!query) return segments;
@@ -752,7 +899,8 @@ function TranslatePageContent() {
     return Boolean(
       segment &&
         segment.status !== "approved" &&
-        hasTranslatedOutput(segment),
+        hasTranslatedOutput(segment) &&
+        canApproveSegment(segment),
     );
   }).length;
   const nonCardPageSize = viewMode === "table" ? tablePageSize : 10;
@@ -779,6 +927,123 @@ function TranslatePageContent() {
   }, [docId]);
 
   useEffect(() => {
+    if (!docId) {
+      setCurrentRole(null);
+      setCollaboratorData(null);
+      setPresenceData(null);
+      setAccessDenied(null);
+      setAccessLoading(false);
+      return;
+    }
+
+    let cancelled = false;
+    setAccessLoading(true);
+    setAccessDenied(null);
+
+    void getDocumentCollaborators(docId)
+      .then((collaboratorsResponse) => {
+        if (cancelled) return;
+        setCollaboratorData(collaboratorsResponse);
+        setPresenceData({
+          documentId: docId,
+          currentRole: collaboratorsResponse.currentRole,
+          activeUsers: [],
+        });
+        setCurrentRole(collaboratorsResponse.currentRole);
+        setSelectedAssignee((current) =>
+          current ||
+          collaboratorsResponse.collaborators.find(
+            (collaborator) => collaborator.role === "editor",
+          )?.collaboratorClerkUserId ||
+          "",
+        );
+        setAccessDenied(null);
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        const message =
+          error instanceof Error
+            ? error.message
+            : "You do not have access to this shared translation space.";
+        setAccessDenied(message);
+        setCurrentRole(null);
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setAccessLoading(false);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [docId]);
+
+  useEffect(() => {
+    if (!docId || accessDenied || !currentRole || !userId) return;
+
+    const socket = new WebSocket(
+      getCollaborationPresenceWebSocketUrl(docId, userId),
+    );
+    let pingTimer: number | undefined;
+
+    socket.onopen = () => {
+      pingTimer = window.setInterval(() => {
+        if (socket.readyState === WebSocket.OPEN) {
+          socket.send("ping");
+        }
+      }, 30000);
+    };
+
+    socket.onmessage = (event) => {
+      try {
+        const payload = JSON.parse(event.data) as {
+          type?: string;
+          document_id?: string;
+          active_users?: Array<{
+            id: string;
+            document_id: string;
+            collaborator_clerk_user_id: string;
+            collaborator_email: string;
+            collaborator_name: string | null;
+            role: CollaboratorRole;
+          }>;
+        };
+
+        if (payload.type !== "presence") {
+          return;
+        }
+
+        const nowIso = new Date().toISOString();
+        setPresenceData({
+          documentId: payload.document_id ?? docId,
+          currentRole,
+          activeUsers: (payload.active_users ?? []).map((user) => ({
+            id: user.id,
+            documentId: user.document_id,
+            collaboratorClerkUserId: user.collaborator_clerk_user_id,
+            collaboratorEmail: user.collaborator_email,
+            collaboratorName: user.collaborator_name,
+            role: user.role,
+            lastSeenAt: nowIso,
+            createdAt: nowIso,
+            updatedAt: nowIso,
+          })),
+        });
+      } catch {
+        // Ignore malformed payloads.
+      }
+    };
+
+    return () => {
+      if (pingTimer) {
+        window.clearInterval(pingTimer);
+      }
+      socket.close();
+    };
+  }, [accessDenied, currentRole, docId, userId]);
+
+  useEffect(() => {
     if (!docId) return;
 
     persistLocalWorkspaceState(docId, {
@@ -787,9 +1052,26 @@ function TranslatePageContent() {
     });
   }, [docId, outputOverrides, sourceOverrides]);
 
+  useEffect(() => {
+    setSegments((prev) =>
+      prev.map((segment) => ({
+        ...segment,
+        source_text: sourceOverrides[segment.segment_id] ?? segment.source_text,
+        final_text: outputOverrides[segment.segment_id] ?? segment.final_text,
+        sourceEdited: Boolean(sourceOverrides[segment.segment_id]),
+      })),
+    );
+  }, [outputOverrides, sourceOverrides]);
+
   const loadSegments = async (
     nextStatusFilter: StatusFilter = statusFilter,
   ) => {
+    if (accessDenied || !currentRole) {
+      setSegments([]);
+      setLoading(false);
+      return;
+    }
+
     setLoading(true);
 
     if (!docId) {
@@ -808,13 +1090,13 @@ function TranslatePageContent() {
           ),
         )
         .filter(isVisibleSegment)
-        .map((segment) => ({
-          ...segment,
-          source_text:
-            sourceOverrides[segment.segment_id] ?? segment.source_text,
-          final_text: outputOverrides[segment.segment_id] ?? segment.final_text,
-          sourceEdited: Boolean(sourceOverrides[segment.segment_id]),
-        }));
+        .map((segment) =>
+          applyWorkspaceOverridesToSegment(
+            segment,
+            sourceOverrides,
+            outputOverrides,
+          ),
+        );
 
       setSegments(normalizedSegments);
     } catch {
@@ -831,8 +1113,10 @@ function TranslatePageContent() {
   };
 
   useEffect(() => {
-    void loadSegments(statusFilter);
-  }, [docId, outputOverrides, sourceOverrides, statusFilter]);
+    if (!accessLoading) {
+      void loadSegments(statusFilter);
+    }
+  }, [accessDenied, accessLoading, currentRole, docId, statusFilter]);
 
   useEffect(() => {
     setVisibleCount(INITIAL_SEGMENT_BATCH);
@@ -875,72 +1159,158 @@ function TranslatePageContent() {
     getExportStatus(docId)
       .then((data) => setExportStatus(data))
       .catch(() => setExportStatus(null));
-  }, [docId, segments]);
-
-  useEffect(() => {
-    if (!docId) {
-      setShareOverview({
-        ownedByDocument: {},
-        visibleByDocument: {},
-        receivedDocumentIds: [],
-      });
-      return;
-    }
-
-    getShareOverview()
-      .then((data) => setShareOverview(data))
-      .catch(() =>
-        setShareOverview({
-          ownedByDocument: {},
-          visibleByDocument: {},
-          receivedDocumentIds: [],
-        }),
-      );
   }, [docId]);
 
-  const refreshSingleSegment = async (segmentId: string) => {
-    const refreshed = (await getSegments(docId, getStatusParam(statusFilter)))
-      .map((segment, index) =>
-        normalizeSegment(
-          segment as Partial<Segment> & Record<string, unknown>,
-          index,
-        ),
-      )
-      .filter(isVisibleSegment);
-    const nextSegment = refreshed.find(
-      (segment) => segment.segment_id === segmentId,
+  const applyStreamedSegment = (
+    rawSegment: Record<string, unknown>,
+    nextStatusFilter: StatusFilter,
+  ) => {
+    const normalizedSegment = normalizeSegment(
+      rawSegment as Partial<Segment> & Record<string, unknown>,
+      0,
     );
 
-    if (!nextSegment) {
+    if (!isVisibleSegment(normalizedSegment)) {
       setSegments((prev) =>
-        prev.filter((segment) => segment.segment_id !== segmentId),
+        prev.filter(
+          (segment) => segment.segment_id !== normalizedSegment.segment_id,
+        ),
       );
       return;
     }
 
-    setSegments((prev) =>
-      prev.map((segment) =>
-        segment.segment_id === segmentId
-          ? {
-              ...nextSegment,
-              source_text:
-                sourceOverrides[nextSegment.segment_id] ??
-                nextSegment.source_text,
-              final_text:
-                outputOverrides[nextSegment.segment_id] ??
-                nextSegment.final_text,
-              sourceEdited: Boolean(sourceOverrides[nextSegment.segment_id]),
-            }
-          : segment,
-      ),
+    if (!matchesStatusFilter(normalizedSegment, nextStatusFilter)) {
+      setSegments((prev) =>
+        prev.filter(
+          (segment) => segment.segment_id !== normalizedSegment.segment_id,
+        ),
+      );
+      return;
+    }
+
+    const nextSegment = applyWorkspaceOverridesToSegment(
+      normalizedSegment,
+      sourceOverrides,
+      outputOverrides,
     );
+
+    setSegments((prev) => {
+      const existingIndex = prev.findIndex(
+        (segment) => segment.segment_id === nextSegment.segment_id,
+      );
+
+      if (existingIndex >= 0) {
+        const next = [...prev];
+        next[existingIndex] = nextSegment;
+        return next;
+      }
+
+      return [...prev, nextSegment];
+    });
+  };
+
+  const startTranslationStream = async (
+    segmentIds: string[],
+    options?: {
+      isRetry?: boolean;
+      retrySegmentId?: string;
+      forceLlmSegmentIds?: string[];
+    },
+  ) => {
+    streamControllerRef.current?.abort();
+    const controller = new AbortController();
+    streamControllerRef.current = controller;
+
+    setTranslating(true);
+    setTranslationMessage(null);
+    setStreamProgress({ completed: 0, total: segmentIds.length, translated: 0 });
+    let latestTranslated = 0;
+    let latestTotal = segmentIds.length;
+
+    try {
+      await streamTranslateDocument(
+        docId,
+        targetLangRef.current,
+        [],
+        segmentIds,
+        options?.forceLlmSegmentIds,
+        (event: TranslationStreamEvent) => {
+          if (event.type === "start") {
+            latestTotal = event.total_segments;
+            setStreamProgress({
+              completed: 0,
+              total: event.total_segments,
+              translated: 0,
+            });
+            return;
+          }
+
+          if (event.type === "segment") {
+            applyStreamedSegment(event.segment, statusFilter);
+            return;
+          }
+
+          if (event.type === "progress" || event.type === "complete") {
+            latestTranslated = event.translated;
+            latestTotal = event.total;
+            setStreamProgress({
+              completed: event.completed,
+              total: event.total,
+              translated: event.translated,
+            });
+          }
+        },
+        controller.signal,
+      );
+
+      setSelectedIds((prev) => {
+        if (options?.isRetry) return prev;
+        const next = new Set(prev);
+        for (const segmentId of segmentIds) {
+          next.delete(segmentId);
+        }
+        return next;
+      });
+      const exportData = await getExportStatus(docId).catch(() => null);
+      setExportStatus(exportData);
+      setTranslationMessage(
+        options?.isRetry
+          ? "Selected segment retranslated."
+          : `${latestTranslated} of ${latestTotal} selected segment${latestTotal === 1 ? "" : "s"} translated.`,
+      );
+    } catch {
+      if (controller.signal.aborted) {
+        return;
+      }
+
+      setTranslationMessage(
+        options?.isRetry
+          ? "Segment retranslation failed. Please try again."
+          : "Translation failed. Please try again.",
+      );
+      toast({
+        title: options?.isRetry ? "Retry failed" : "Translation failed",
+        description: options?.isRetry
+          ? "The segment could not be retranslated right now."
+          : "Could not run translation. Ensure the backend is running and the API URL is configured correctly.",
+        variant: "destructive",
+      });
+    } finally {
+      if (streamControllerRef.current === controller) {
+        streamControllerRef.current = null;
+      }
+      setTranslating(false);
+      if (options?.retrySegmentId) {
+        setRetryingId(null);
+      }
+    }
   };
 
   const handleTranslate = async () => {
-    if (!docId) return;
+    if (!docId || !canModifyWorkspace) return;
     const segmentIds = Array.from(selectedIds).filter((id) => {
       const segment = segments.find((item) => item.segment_id === id);
-      return Boolean(segment && segment.status !== "approved");
+      return Boolean(segment && segment.status !== "approved" && canOperateSegment(segment));
     });
 
     if (segmentIds.length === 0) {
@@ -953,31 +1323,19 @@ function TranslatePageContent() {
       return;
     }
 
-    setTranslating(true);
-    setTranslationMessage(null);
-
-    try {
-      const data = await translateDocument(docId, targetLang, [], segmentIds);
-      await loadSegments(statusFilter);
-      const exportData = await getExportStatus(docId).catch(() => null);
-      setExportStatus(exportData);
-      setTranslationMessage(
-        `${data.segments_translated} selected segment${data.segments_translated === 1 ? "" : "s"} translated`,
-      );
-    } catch (error) {
-      setTranslationMessage("Translation failed. Please try again.");
-      toast({
-        title: "Translation failed",
-        description:
-          "Could not run translation. Ensure the backend is running and the API URL is configured correctly.",
-        variant: "destructive",
-      });
-    } finally {
-      setTranslating(false);
-    }
+    await startTranslationStream(segmentIds);
   };
 
   const handleRetry = async (segment: WorkspaceSegment) => {
+    if (!canOperateSegment(segment)) {
+      toast({
+        title: "Segment unavailable",
+        description: "This segment must be assigned to you before retranslation.",
+        variant: "destructive",
+      });
+      return;
+    }
+    if (!canModifyWorkspace) return;
     if (sourceOverrides[segment.segment_id]) {
       setTranslationMessage(
         "Retranslation uses the backend's original source for edited segments.",
@@ -985,22 +1343,11 @@ function TranslatePageContent() {
     }
 
     setRetryingId(segment.segment_id);
-    try {
-      await translateDocument(docId, targetLang, [], [segment.segment_id]);
-      await refreshSingleSegment(segment.segment_id);
-      const exportData = await getExportStatus(docId).catch(() => null);
-      setExportStatus(exportData);
-      setTranslationMessage("Selected segment retranslated.");
-    } catch {
-      setTranslationMessage("Segment retranslation failed. Please try again.");
-      toast({
-        title: "Retry failed",
-        description: "The segment could not be retranslated right now.",
-        variant: "destructive",
-      });
-    } finally {
-      setRetryingId(null);
-    }
+    await startTranslationStream([segment.segment_id], {
+      isRetry: true,
+      retrySegmentId: segment.segment_id,
+      forceLlmSegmentIds: [segment.segment_id],
+    });
   };
 
   const handleExport = async () => {
@@ -1026,6 +1373,23 @@ function TranslatePageContent() {
     finalText: string,
     options?: { silentSuccess?: boolean; skipConfirm?: boolean },
   ) => {
+    if (!canApproveSegments) {
+      toast({
+        title: "Approval restricted",
+        description: "Only owners and editors can approve segments in the shared workspace.",
+        variant: "destructive",
+      });
+      return;
+    }
+    if (!canApproveSegment(segment)) {
+      toast({
+        title: "Approval restricted",
+        description: "This segment must be assigned to you before approval.",
+        variant: "destructive",
+      });
+      return;
+    }
+
     const segmentId = segment.segment_id;
 
     if (
@@ -1078,6 +1442,7 @@ function TranslatePageContent() {
   };
 
   const handleUpdateOutput = (segmentId: string, finalText: string) => {
+    if (!canModifyWorkspace) return;
     setOutputOverrides((prev) => ({ ...prev, [segmentId]: finalText }));
     setSegments((prev) =>
       prev.map((segment) =>
@@ -1089,6 +1454,7 @@ function TranslatePageContent() {
   };
 
   const handleUpdateSource = (segmentId: string, sourceText: string) => {
+    if (!canModifyWorkspace) return;
     setSourceOverrides((prev) => ({ ...prev, [segmentId]: sourceText }));
     setSegments((prev) =>
       prev.map((segment) =>
@@ -1112,6 +1478,15 @@ function TranslatePageContent() {
   };
 
   const handleBulkApprove = async () => {
+    if (!canApproveSegments) {
+      toast({
+        title: "Approval restricted",
+        description: "Only owners and editors can approve segments in the shared workspace.",
+        variant: "destructive",
+      });
+      return;
+    }
+
     const approvableSegments = Array.from(selectedIds)
       .map((id) => segments.find((item) => item.segment_id === id))
       .filter((segment): segment is WorkspaceSegment => {
@@ -1130,19 +1505,68 @@ function TranslatePageContent() {
       return;
     }
 
-    for (const segment of approvableSegments) {
-      await handleApprove(segment, getSegmentOutputText(segment), {
-        silentSuccess: true,
-        skipConfirm: true,
-      });
-    }
-    setSelectedIds(new Set());
-    if (count > 0) {
-      toast({ title: `${count} segments approved` });
-    } else {
+    if (count === 0) {
       toast({
         title: "No translated segments selected",
         description: "Only translated segments can be approved.",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    try {
+      const result = await approveSegmentsBatch(
+        approvableSegments.map((segment) => ({
+          segment_id: segment.segment_id,
+          correction: getSegmentOutputText(segment),
+        })),
+      );
+
+      setOutputOverrides((prev) => {
+        const next = { ...prev };
+        for (const item of result.succeeded) {
+          delete next[item.segment_id];
+        }
+        return next;
+      });
+
+      if (statusFilter === "all") {
+        const succeededById = new Map(
+          result.succeeded.map((item) => [item.segment_id, item]),
+        );
+        setSegments((prev) =>
+          prev.map((segment) => {
+            const approved = succeededById.get(segment.segment_id);
+            if (!approved) return segment;
+            return {
+              ...segment,
+              status: approved.status as Segment["status"],
+              final_text: approved.final_text,
+            };
+          }),
+        );
+      } else {
+        await loadSegments(statusFilter);
+      }
+
+      const exportData = await getExportStatus(docId).catch(() => null);
+      setExportStatus(exportData);
+
+      setSelectedIds(new Set());
+
+      if (result.failed.length === 0) {
+        toast({ title: `${result.succeeded.length} segments approved` });
+      } else {
+        toast({
+          title: `Approved ${result.succeeded.length}, failed ${result.failed.length}`,
+          description: "Some selected segments could not be approved.",
+          variant: "destructive",
+        });
+      }
+    } catch {
+      toast({
+        title: "Batch approval failed",
+        description: "Could not approve selected segments right now.",
         variant: "destructive",
       });
     }
@@ -1178,19 +1602,166 @@ function TranslatePageContent() {
     }
   };
 
+  const handleClaimSelected = async () => {
+    if (!docId || !userId || !canModifyWorkspace) return;
+    const segmentIds = Array.from(selectedIds).filter((id) => {
+      const segment = segments.find((item) => item.segment_id === id);
+      return Boolean(segment && segment.status !== "approved");
+    });
+    if (segmentIds.length === 0) {
+      toast({
+        title: "No eligible segments selected",
+        description: "Select one or more non-approved segments to claim.",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    try {
+      const response = await claimSegments(docId, segmentIds, userId);
+      const assignmentBySegment = new Map(
+        response.assignments.map((assignment) => [assignment.segment_id, assignment]),
+      );
+
+      setSegments((prev) =>
+        prev.map((segment) => {
+          const assignment = assignmentBySegment.get(segment.segment_id);
+          if (!assignment) return segment;
+
+          return {
+            ...segment,
+            assigned_to_clerk_user_id: assignment.assigned_to_clerk_user_id,
+            assigned_to_email: assignment.assigned_to_email,
+            assigned_to_name: assignment.assigned_to_name ?? null,
+          };
+        }),
+      );
+      setSelectedIds(new Set());
+      setTranslationMessage(
+        `${segmentIds.length} segment${segmentIds.length === 1 ? "" : "s"} assigned to you.`,
+      );
+    } catch (error) {
+      toast({
+        title: "Could not claim segments",
+        description:
+          error instanceof Error ? error.message : "The selected segments could not be claimed.",
+        variant: "destructive",
+      });
+    }
+  };
+
+  const handleAssignSelected = async () => {
+    if (!docId) return;
+    if (currentRole !== "owner") {
+      toast({
+        title: "Owner access required",
+        description: "Only the document owner can assign segments to editors.",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    const segmentIds = Array.from(selectedIds).filter((id) => {
+      const segment = segments.find((item) => item.segment_id === id);
+      return Boolean(segment && segment.status !== "approved");
+    });
+
+    if (segmentIds.length === 0 || !selectedAssignee) {
+      toast({
+        title: "Assignment incomplete",
+        description: "Select segments and choose a collaborator first.",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    const assigneeIsEditor = assignableCollaborators.some(
+      (collaborator) =>
+        collaborator.collaboratorClerkUserId === selectedAssignee,
+    );
+
+    if (!assigneeIsEditor) {
+      setSelectedAssignee(
+        assignableCollaborators[0]?.collaboratorClerkUserId ?? "",
+      );
+      toast({
+        title: "Choose an editor",
+        description:
+          "The selected assignee is no longer available. Please choose an editor again.",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    try {
+      const response = await assignSegments(docId, segmentIds, selectedAssignee);
+      const assignmentBySegment = new Map(
+        response.assignments.map((assignment) => [assignment.segment_id, assignment]),
+      );
+
+      setSegments((prev) =>
+        prev.map((segment) => {
+          const assignment = assignmentBySegment.get(segment.segment_id);
+          if (!assignment) return segment;
+
+          return {
+            ...segment,
+            assigned_to_clerk_user_id: assignment.assigned_to_clerk_user_id,
+            assigned_to_email: assignment.assigned_to_email,
+            assigned_to_name: assignment.assigned_to_name ?? null,
+          };
+        }),
+      );
+      setSelectedIds(new Set());
+      setTranslationMessage(
+        `${segmentIds.length} segment${segmentIds.length === 1 ? "" : "s"} reassigned.`,
+      );
+    } catch (error) {
+      toast({
+        title: "Could not assign segments",
+        description:
+          error instanceof Error ? error.message : "The selected segments could not be assigned.",
+        variant: "destructive",
+      });
+    }
+  };
+
+  const beginSegmentEdit = async (segment: WorkspaceSegment) => {
+    if (!docId) return false;
+    if (!canOperateSegment(segment)) {
+      toast({
+        title: "Segment unavailable",
+        description:
+          segment.assigned_to_name || segment.assigned_to_email
+            ? `This segment is assigned to ${segment.assigned_to_name || segment.assigned_to_email}.`
+            : "Claim or assign this segment before editing it.",
+        variant: "destructive",
+      });
+      return false;
+    }
+    return true;
+  };
+
+  const finishSegmentEdit = async (segment: WorkspaceSegment) => {
+    // No longer needs to unlock since lock logic is removed.
+  };
+
   const handleOpenInlineEdit = (
     segment: WorkspaceSegment,
     field: "source" | "output",
   ) => {
+    if (!canModifyWorkspace) return;
     if (segment.status === "approved") return;
-
-    setInlineEditState({
-      segmentId: segment.segment_id,
-      field,
-      value:
-        field === "source"
-          ? segment.source_text
-          : getSegmentOutputText(segment),
+    void beginSegmentEdit(segment).then((allowed) => {
+      if (!allowed) return;
+      setInlineEditState({
+        segmentId: segment.segment_id,
+        field,
+        value:
+          field === "source"
+            ? segment.source_text
+            : getSegmentOutputText(segment),
+      });
     });
   };
 
@@ -1208,10 +1779,22 @@ function TranslatePageContent() {
         inlineEditState.field === "source" ? "Source updated" : "Output updated",
       description: "The segment was updated in your workspace.",
     });
+    const currentSegment = segments.find(
+      (segment) => segment.segment_id === inlineEditState.segmentId,
+    );
+    if (currentSegment) {
+      void finishSegmentEdit(currentSegment);
+    }
     setInlineEditState(null);
   };
 
   const handleCancelInlineEdit = () => {
+    const currentSegment = segments.find(
+      (segment) => segment.segment_id === inlineEditState?.segmentId,
+    );
+    if (currentSegment) {
+      void finishSegmentEdit(currentSegment);
+    }
     setInlineEditState(null);
   };
 
@@ -1232,10 +1815,8 @@ function TranslatePageContent() {
   const progress = segments.length
     ? Math.round((completedCount / segments.length) * 100)
     : 0;
-  const sharedRecipients =
-    docId && shareOverview.visibleByDocument[docId]
-      ? shareOverview.visibleByDocument[docId].participants
-      : [];
+  const sharedRecipients = presenceData?.activeUsers ?? [];
+  const totalCollaborators = collaboratorData?.collaborators.length ?? 0;
   const recipientOffsets = [
     "left-[10%] top-[14%]",
     "left-[36%] top-[38%]",
@@ -1254,14 +1835,34 @@ function TranslatePageContent() {
   ];
 
   return (
-    <AppShell
-      title="Translation Editor"
-      subtitle={
-        docId
-          ? `Document ${docId.slice(0, 20)}...  |  ${segments.length} segments in review`
-          : "Open a document to start translating"
-      }
-    >
+    <>
+      <LayoutHeader
+        title="Translate & Review"
+        subtitle="Generate AI drafts, verify terminology, and approve final segments for export."
+      />
+      {accessLoading ? (
+        <div className="glass-panel flex flex-col items-center gap-4 rounded-[2rem] py-24">
+          <Spinner className="h-8 w-8 text-primary" />
+          <p className="text-sm text-muted-foreground">
+            Loading shared workspace access...
+          </p>
+        </div>
+      ) : accessDenied ? (
+        <div className="glass-panel flex flex-col items-center gap-4 rounded-[2rem] py-24 text-center">
+          <Users className="h-10 w-10 text-muted-foreground/50" />
+          <div className="space-y-1">
+            <p className="text-lg font-semibold text-foreground">
+              Collaboration access required
+            </p>
+            <p className="max-w-xl text-sm leading-7 text-muted-foreground">
+              {accessDenied}
+            </p>
+          </div>
+          <Button variant="outline" className="rounded-xl" onClick={() => router.push("/documents")}>
+            Back to documents
+          </Button>
+        </div>
+      ) : (
       <div className="space-y-6">
         <Reveal className="glass-panel hero-sheen overflow-hidden rounded-[2rem]">
           <div className="grid gap-6 px-6 py-6 lg:grid-cols-[minmax(0,1.15fr)_minmax(280px,0.85fr)] lg:px-8 lg:py-8">
@@ -1299,12 +1900,14 @@ function TranslatePageContent() {
                     </p>
                     <p className="mt-1 text-sm text-slate-600 dark:text-slate-300">
                       {sharedRecipients.length > 0
-                        ? `${sharedRecipients.length} collaborator${sharedRecipients.length === 1 ? "" : "s"} in this document`
-                        : "Share this file to bring reviewers here"}
+                        ? `${sharedRecipients.length} active now, ${totalCollaborators} collaborator${totalCollaborators === 1 ? "" : "s"} total`
+                        : totalCollaborators > 0
+                          ? `${totalCollaborators} collaborator${totalCollaborators === 1 ? "" : "s"} attached to this document`
+                          : "Add collaborators from the documents page to begin sharing this workspace"}
                     </p>
                   </div>
                   <div className="rounded-full border border-cyan-300/25 bg-white/60 px-3 py-1 text-xs text-slate-600 dark:border-white/10 dark:bg-white/5 dark:text-slate-300">
-                    Live access
+                    {currentRole ? `${currentRole} access` : "Live access"}
                   </div>
                 </div>
 
@@ -1312,7 +1915,7 @@ function TranslatePageContent() {
                   <div className="relative h-full min-h-[16rem] mt-10">
                     {sharedRecipients.slice(0, 6).map((recipient, index) => (
                       <motion.div
-                        key={`${recipient.clerkUserId}-${index}`}
+                        key={`${recipient.collaboratorClerkUserId}-${index}`}
                         className={`absolute ${recipientOffsets[index % recipientOffsets.length]}`}
                         animate={{
                           y: [0, -10, 0],
@@ -1337,8 +1940,8 @@ function TranslatePageContent() {
                                   className={`bg-gradient-to-br ${recipientThemes[index % recipientThemes.length]} text-base font-semibold text-white`}
                                 >
                                   {getUserInitials(
-                                    recipient.name,
-                                    recipient.email,
+                                    recipient.collaboratorName,
+                                    recipient.collaboratorEmail,
                                   )}
                                 </AvatarFallback>
                               </Avatar>
@@ -1355,20 +1958,20 @@ function TranslatePageContent() {
                                   className={`bg-gradient-to-br ${recipientThemes[index % recipientThemes.length]} text-sm font-semibold text-white`}
                                 >
                                   {getUserInitials(
-                                    recipient.name,
-                                    recipient.email,
+                                    recipient.collaboratorName,
+                                    recipient.collaboratorEmail,
                                   )}
                                 </AvatarFallback>
                               </Avatar>
                               <div className="min-w-0">
                                 <p className="truncate text-sm font-semibold text-foreground">
-                                  {recipient.name ||
+                                  {recipient.collaboratorName ||
                                     (recipient.role === "owner"
                                       ? "Owner"
                                       : "Collaborator")}
                                 </p>
                                 <p className="truncate text-xs text-muted-foreground">
-                                  {recipient.email || "No email available"}
+                                  {recipient.collaboratorEmail || "No email available"}
                                 </p>
                               </div>
                             </div>
@@ -1376,7 +1979,7 @@ function TranslatePageContent() {
                               variant="outline"
                               className="rounded-full text-[10px] font-semibold uppercase tracking-[0.16em]"
                             >
-                              {recipient.role === "owner" ? "Owner" : "Shared"}
+                              {recipient.role}
                             </Badge>
                           </HoverCardContent>
                         </ProfileHoverCard>
@@ -1386,9 +1989,8 @@ function TranslatePageContent() {
                 ) : (
                   <div className="flex min-h-[16rem] items-center justify-center px-8">
                     <p className="max-w-xs text-center text-sm leading-7 text-slate-500 dark:text-slate-400">
-                      Once this document is shared, everyone who opens it will
-                      appear here so collaborators can see the same presence
-                      view.
+                      Active collaborators will appear here once teammates open
+                      the same shared translation space.
                     </p>
                   </div>
                 )}
@@ -1410,6 +2012,17 @@ function TranslatePageContent() {
                 <p className="mt-2 text-sm leading-7 text-muted-foreground">
                   Filter the queue, track progress, and take action on segments
                   without leaving the page.
+                </p>
+                <p className="mt-2 text-xs text-muted-foreground">
+                  Role:{" "}
+                  <span className="font-semibold capitalize text-foreground">
+                    {currentRole}
+                  </span>
+                  {currentRole === "viewer"
+                    ? " - viewers can inspect shared progress but cannot edit or approve."
+                    : currentRole === "editor"
+                      ? " - editors can translate, edit, and approve segments."
+                      : " - owners can manage access, coordinate the workspace, and approve segments."}
                 </p>
               </div>
 
@@ -1446,19 +2059,60 @@ function TranslatePageContent() {
                   variant="outline"
                   className="h-10 rounded-full"
                   onClick={handleSelectAll}
+                  disabled={!canModifyWorkspace}
                 >
                   {allSelected ? "Clear Selection" : "Select All"}
                 </Button>
+                <Button
+                  variant="outline"
+                  className="h-10 rounded-full"
+                  onClick={() => void handleClaimSelected()}
+                  disabled={!canModifyWorkspace || selectedIds.size === 0}
+                >
+                  {currentRole === "owner" ? "Assign To Me" : "Claim Selected"}
+                </Button>
                 {selectedApprovableCount > 0 && (
                   <Button
-                    variant="outline"
-                    className="h-10 rounded-full"
-                    onClick={() => void handleBulkApprove()}
-                  >
-                    <CheckCircle2 className="mr-2 h-4 w-4" />
-                    Bulk Accept ({selectedApprovableCount})
-                  </Button>
+                  variant="outline"
+                  className="h-10 rounded-full"
+                  onClick={() => void handleBulkApprove()}
+                  disabled={!canApproveSegments}
+                >
+                  <CheckCircle2 className="mr-2 h-4 w-4" />
+                  Bulk Accept ({selectedApprovableCount})
+                </Button>
                 )}
+                {currentRole === "owner" && assignableCollaborators.length ? (
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Select
+                      value={selectedAssignee}
+                      onValueChange={setSelectedAssignee}
+                    >
+                      <SelectTrigger className="h-10 min-w-[220px] rounded-full border-border/70 bg-background/90 text-sm">
+                        <SelectValue placeholder="Assign selected to..." />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {assignableCollaborators.map((collaborator) => (
+                          <SelectItem
+                            key={collaborator.collaboratorClerkUserId}
+                            value={collaborator.collaboratorClerkUserId}
+                          >
+                            {(collaborator.collaboratorName || collaborator.collaboratorEmail) +
+                              ` (${collaborator.role})`}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                    <Button
+                      variant="outline"
+                      className="h-10 rounded-full"
+                      onClick={() => void handleAssignSelected()}
+                      disabled={selectedIds.size === 0 || !selectedAssignee}
+                    >
+                      Assign Selected
+                    </Button>
+                  </div>
+                ) : null}
                 <Button
                   variant="outline"
                   className="h-10 rounded-full"
@@ -1621,23 +2275,42 @@ function TranslatePageContent() {
                       Translating... this may take a moment for large documents.
                     </p>
                     <p className="mt-1 text-sm text-muted-foreground">
-                      Keep this page open while the segments are translated and
-                      refreshed.
+                      {streamProgress.total > 0
+                        ? `${streamProgress.completed} of ${streamProgress.total} segments processed, ${streamProgress.translated} translated so far.`
+                        : "Keep this page open while the segments are translated and refreshed."}
                     </p>
                   </div>
                 </div>
                 <div className="mt-4 h-2.5 overflow-hidden rounded-full bg-primary/10">
-                  <div className="h-full w-1/3 animate-pulse rounded-full bg-gradient-to-r from-primary via-sky-400 to-cyan-400" />
+                  <div
+                    className="h-full rounded-full bg-gradient-to-r from-primary via-sky-400 to-cyan-400 transition-all duration-300"
+                    style={{
+                      width:
+                        streamProgress.total > 0
+                          ? `${Math.max(
+                              6,
+                              Math.round(
+                                (streamProgress.completed / streamProgress.total) *
+                                  100,
+                              ),
+                            )}%`
+                          : "20%",
+                    }}
+                  />
                 </div>
               </div>
             )}
 
-            <div className="mt-5 grid gap-3 rounded-[1.5rem] border border-border/60 bg-background/75 p-4 xl:grid-cols-[minmax(0,0.9fr)_minmax(0,0.9fr)_auto] xl:items-end">
+            { currentRole != "viewer" && <div className="mt-5 grid gap-3 rounded-[1.5rem] border border-border/60 bg-background/75 p-4 xl:grid-cols-[minmax(0,0.9fr)_minmax(0,0.9fr)_auto] xl:items-end">
               <div className="min-w-0">
                 <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">
                   Target Language
                 </p>
-                <Select value={targetLang} onValueChange={setTargetLang}>
+                <Select
+                  value={targetLang}
+                  onValueChange={setTargetLang}
+                  disabled={!canModifyWorkspace}
+                >
                   <SelectTrigger className="mt-2 h-11 rounded-xl border-border/70 bg-background/90 text-sm">
                     <SelectValue />
                   </SelectTrigger>
@@ -1678,7 +2351,7 @@ function TranslatePageContent() {
                 <Button
                   className="h-11 rounded-2xl"
                   onClick={() => void handleTranslate()}
-                  disabled={translating || !docId}
+                  disabled={translating || !docId || !canModifyWorkspace}
                 >
                   {translating ? (
                     <>
@@ -1702,7 +2375,7 @@ function TranslatePageContent() {
                   Export
                 </Button>
               </div>
-            </div>
+            </div>}
           </Reveal>
         </section>
 
@@ -1775,7 +2448,14 @@ function TranslatePageContent() {
                       onUpdateOutput={handleUpdateOutput}
                       onUpdateSource={handleUpdateSource}
                       onRetry={handleRetry}
+                      onStartEdit={beginSegmentEdit}
+                      onFinishEdit={finishSegmentEdit}
                       retrying={retryingId === segment.segment_id}
+                      canModifyWorkspace={canModifyWorkspace}
+                      canApproveSegments={canApproveSegments}
+                      currentUserId={userId}
+                      canOperateSegment={canOperateSegment(segment)}
+                      canApproveSegment={canApproveSegment(segment)}
                     />
                   ))}
                 </AnimatePresence>
@@ -1806,7 +2486,7 @@ function TranslatePageContent() {
                             type="checkbox"
                             checked={selectedIds.has(segment.segment_id)}
                             onChange={() => toggleSelect(segment.segment_id)}
-                            disabled={segment.status === "approved"}
+                            disabled={segment.status === "approved" || !canModifyWorkspace}
                             className="h-4 w-4 rounded accent-primary"
                           />
                           <p className="text-xs font-semibold uppercase tracking-[0.18em] text-muted-foreground">
@@ -1856,6 +2536,7 @@ function TranslatePageContent() {
                             className={cn(
                               "mt-3 line-clamp-2 text-sm leading-7 text-foreground",
                               segment.status !== "approved" &&
+                                canOperateSegment(segment) &&
                                 "cursor-text rounded-xl transition-colors hover:bg-muted/35 hover:px-2 hover:py-1",
                             )}
                           >
@@ -1903,6 +2584,7 @@ function TranslatePageContent() {
                             className={cn(
                               "mt-2 line-clamp-2 text-sm leading-7 text-muted-foreground",
                               segment.status !== "approved" &&
+                                canOperateSegment(segment) &&
                                 "cursor-text rounded-xl transition-colors hover:bg-muted/35 hover:px-2 hover:py-1",
                             )}
                           >
@@ -1918,7 +2600,7 @@ function TranslatePageContent() {
                             variant="outline"
                             className="rounded-xl border-amber-300/80 text-amber-700 hover:bg-amber-100/80 dark:border-amber-900/70 dark:text-amber-200 dark:hover:bg-amber-950/50"
                             onClick={() => void handleRetry(segment)}
-                            disabled={retryingId === segment.segment_id}
+                            disabled={retryingId === segment.segment_id || !canOperateSegment(segment)}
                             title="Retranslate segment"
                             aria-label={`Retranslate segment ${segment.segment_id}`}
                           >
@@ -1939,6 +2621,7 @@ function TranslatePageContent() {
                                   getSegmentOutputText(segment),
                                 )
                               }
+                              disabled={!canApproveSegment(segment)}
                               title="Approve translation"
                               aria-label={`Approve segment ${segment.segment_id}`}
                             >
@@ -1980,7 +2663,7 @@ function TranslatePageContent() {
                             type="checkbox"
                             checked={selectedIds.has(segment.segment_id)}
                             onChange={() => toggleSelect(segment.segment_id)}
-                            disabled={segment.status === "approved"}
+                            disabled={segment.status === "approved" || !canModifyWorkspace}
                             className="h-4 w-4 rounded accent-primary"
                           />
                         </TableCell>
@@ -2032,6 +2715,7 @@ function TranslatePageContent() {
                               className={cn(
                                 "line-clamp-3 text-sm leading-7 text-foreground",
                                 segment.status !== "approved" &&
+                                  canOperateSegment(segment) &&
                                   "cursor-text rounded-xl transition-colors hover:bg-muted/35 hover:px-2 hover:py-1",
                               )}
                             >
@@ -2081,6 +2765,7 @@ function TranslatePageContent() {
                               className={cn(
                                 "line-clamp-3 text-sm leading-7 text-muted-foreground",
                                 segment.status !== "approved" &&
+                                  canOperateSegment(segment) &&
                                   "cursor-text rounded-xl transition-colors hover:bg-muted/35 hover:px-2 hover:py-1",
                               )}
                             >
@@ -2097,7 +2782,7 @@ function TranslatePageContent() {
                                 variant="outline"
                                 className="rounded-xl border-amber-300/80 text-amber-700 hover:bg-amber-100/80 dark:border-amber-900/70 dark:text-amber-200 dark:hover:bg-amber-950/50"
                                 onClick={() => void handleRetry(segment)}
-                                disabled={retryingId === segment.segment_id}
+                                disabled={retryingId === segment.segment_id || !canOperateSegment(segment)}
                                 title="Retranslate segment"
                                 aria-label={`Retranslate segment ${segment.segment_id}`}
                               >
@@ -2118,6 +2803,7 @@ function TranslatePageContent() {
                                       getSegmentOutputText(segment),
                                     )
                                   }
+                                  disabled={!canApproveSegment(segment)}
                                   title="Approve translation"
                                   aria-label={`Approve segment ${segment.segment_id}`}
                                 >
@@ -2202,7 +2888,8 @@ function TranslatePageContent() {
           </>
         )}
       </div>
-    </AppShell>
+      )}
+    </>
   );
 }
 

@@ -8,9 +8,12 @@ import logging
 import sys
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from starlette.middleware.base import BaseHTTPMiddleware
+
+
 
 # ---------------------------------------------------------------------------
 # Logging configuration
@@ -36,6 +39,7 @@ from app.routers.translation import router as translation_router
 from app.routers.review      import router as review_router
 from app.routers.glossary    import router as glossary_router
 from app.routers.export      import router as export_router
+from app.routers.collaboration import router as collaboration_router
 
 
 # ---------------------------------------------------------------------------
@@ -66,13 +70,18 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"Encoder not pre-loaded: {e}")
 
-    # Pre-load FAISS translation memory
+    # Pre-load FAISS translation memory - REMOVED for Postgresql/pgvector
     try:
-        from app.services.rag_engine import get_tm
-        get_tm()
-        logger.info("FAISS translation memory ready.")
+        from app.database import SessionLocal
+        from app.services.collaboration import ensure_collaboration_tables
+        db = SessionLocal()
+        try:
+            ensure_collaboration_tables(db)
+            logger.info("Collaboration tables ready.")
+        finally:
+            db.close()
     except Exception as e:
-        logger.warning(f"FAISS TM not pre-loaded: {e}")
+        logger.warning(f"Collaboration tables not ensured: {e}")
 
     logger.info("=== Translation Studio ready ===")
     yield
@@ -97,6 +106,7 @@ app = FastAPI(
 # CORS (permissive for MVP — restrict in production)
 # ---------------------------------------------------------------------------
 
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -116,6 +126,7 @@ app.include_router(translation_router)
 app.include_router(review_router)
 app.include_router(glossary_router)
 app.include_router(export_router)
+app.include_router(collaboration_router)
 
 
 # ---------------------------------------------------------------------------

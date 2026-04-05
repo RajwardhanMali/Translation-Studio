@@ -5,6 +5,7 @@ import { getDb } from '@/lib/db-index'
 import { ensureAppTables } from '@/lib/db-ensure'
 import { documentShares } from '@/lib/db/schema'
 import { documentShareAccess } from '@/lib/share-access-schema'
+import { ensureSharedDocumentCollaborator } from '@/lib/document-collaboration'
 
 export default async function SharedDocumentPage({
   params,
@@ -35,6 +36,10 @@ export default async function SharedDocumentPage({
     const primaryEmail =
       user.emailAddresses.find((email) => email.id === user.primaryEmailAddressId)
         ?.emailAddress ?? 'unknown@example.com'
+    const recipientName =
+      [user.firstName, user.lastName].filter(Boolean).join(' ') ||
+      user.username ||
+      null
 
     const existingAccess = await db.query.documentShareAccess.findFirst({
       where: and(
@@ -50,14 +55,22 @@ export default async function SharedDocumentPage({
         ownerClerkUserId: share.ownerClerkUserId,
         recipientClerkUserId: userId,
         recipientEmail: primaryEmail,
-        recipientName:
-          [user.firstName, user.lastName].filter(Boolean).join(' ') ||
-          user.username ||
-          null,
+        recipientName,
         accessedAt: new Date(),
         updatedAt: new Date(),
       })
     }
+
+    await ensureSharedDocumentCollaborator(
+      share.documentId,
+      {
+        clerkUserId: userId,
+        email: primaryEmail,
+        name: recipientName,
+      },
+      share.accessMode === 'editor' ? 'editor' : 'viewer',
+      share.ownerClerkUserId,
+    )
   }
 
   redirect(`/translate?doc=${share.documentId}`)

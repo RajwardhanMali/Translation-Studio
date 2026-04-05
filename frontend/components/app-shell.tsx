@@ -35,12 +35,6 @@ const NAV_ITEMS = [
     description: "Import PDF or DOCX",
   },
   {
-    href: "/translate",
-    label: "Translate",
-    icon: Languages,
-    description: "Review and export",
-  },
-  {
     href: "/glossary",
     label: "Glossary",
     icon: BookOpen,

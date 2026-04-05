@@ -1,11 +1,68 @@
 import axios from "axios";
 
 const BASE_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+const NORMALIZED_BASE_URL = BASE_URL.replace(/\/+$/, "");
+let backendAuthUserId: string | null = null;
+
+function buildApiUrl(path: string) {
+  return `${NORMALIZED_BASE_URL}/${path.replace(/^\/+/, "")}`;
+}
+
+function buildWebSocketUrl(path: string) {
+  const normalizedPath = path.replace(/^\/+/, "");
+  const wsBase = NORMALIZED_BASE_URL.replace(/^http:\/\//i, "ws://").replace(
+    /^https:\/\//i,
+    "wss://",
+  );
+  return `${wsBase}/${normalizedPath}`;
+}
 
 export const apiClient = axios.create({
   baseURL: BASE_URL,
   timeout: 30000,
 });
+
+// Deduplication map for concurrent GET requests
+const ongoingRequests = new Map<string, Promise<any>>();
+
+/**
+ * Wraps a promise-returning function with deduplication based on a unique key.
+ * Only one request for the same key will be in-flight at a time.
+ */
+function deduplicate<T>(key: string, fn: () => Promise<T>): Promise<T> {
+  const existing = ongoingRequests.get(key);
+  if (existing) return existing;
+
+  const promise = fn().finally(() => {
+    ongoingRequests.delete(key);
+  });
+
+  ongoingRequests.set(key, promise);
+  return promise;
+}
+
+export function setBackendAuthUserId(userId: string | null) {
+  backendAuthUserId = userId;
+
+  if (userId) {
+    apiClient.defaults.headers.common["X-Clerk-User-Id"] = userId;
+  } else {
+    delete apiClient.defaults.headers.common["X-Clerk-User-Id"];
+  }
+}
+
+export function getCollaborationPresenceWebSocketUrl(
+  documentId: string,
+  clerkUserId?: string | null,
+): string {
+  const resolvedUserId = clerkUserId ?? backendAuthUserId;
+  const query = resolvedUserId
+    ? `?clerk_user_id=${encodeURIComponent(resolvedUserId)}`
+    : "";
+  return buildWebSocketUrl(`/collaboration/presence/ws/${documentId}${query}`);
+}
+
+type StreamEventHandler<T> = (event: T) => void;
 
 export interface UploadResponse {
   document_id: string;
@@ -28,16 +85,26 @@ export interface DocumentSummary {
     approved: number;
   };
   translation_progress: number;
+  owner_clerk_user_id?: string | null;
+  access_role?: CollaboratorRole | null;
+  is_owner?: boolean;
 }
 
 export interface ValidationIssue {
+  segment_id?: string;
   issue_type: string;
   issue: string;
   suggestion: string;
   severity: "error" | "warning" | "info";
+  span?: string | null;
+  offset?: number | null;
+  length?: number | null;
+  confidence?: number | null;
+  source?: string | null;
 }
 
 export interface ValidationResult {
+  document_id?: string;
   segment_id?: string;
   text: string;
   issues: ValidationIssue[];
@@ -45,6 +112,40 @@ export interface ValidationResult {
   has_errors: boolean;
   has_warnings: boolean;
 }
+
+export type ValidationStreamEvent =
+  | {
+      type: "start";
+      document_id: string;
+      total_segments: number;
+    }
+  | {
+      type: "segment";
+      document_id: string;
+      segment_id?: string;
+      index: number;
+      result: ValidationResult;
+    }
+  | {
+      type: "progress";
+      document_id: string;
+      completed: number;
+      total: number;
+      invalid_segments: number;
+    }
+  | {
+      type: "complete";
+      document_id: string;
+      completed: number;
+      total: number;
+      invalid_segments: number;
+    }
+  | {
+      type: "error";
+      document_id?: string;
+      segment_id?: string;
+      message: string;
+    };
 
 export interface ValidationAppliedFix {
   segment_id: string;
@@ -98,6 +199,9 @@ export interface Segment {
   format_snapshot?: SegmentFormatSnapshot | null;
   row?: number | null;
   col?: number | null;
+  assigned_to_clerk_user_id?: string | null;
+  assigned_to_name?: string | null;
+  assigned_to_email?: string | null;
 }
 
 export interface GlossaryTerm {
@@ -123,7 +227,93 @@ export interface ApproveResponse {
 export interface TranslateResponse {
   document_id?: string;
   segments_translated: number;
-  results?: Segment[];
+  segments?: Segment[];
+}
+
+export type TranslationStreamEvent =
+  | {
+      type: "start";
+      document_id: string;
+      target_language: string;
+      total_segments: number;
+    }
+  | {
+      type: "segment";
+      document_id: string;
+      segment_id: string;
+      index: number;
+      batch: number;
+      total_batches: number;
+      segment: Record<string, unknown>;
+    }
+  | {
+      type: "progress";
+      document_id: string;
+      completed: number;
+      total: number;
+      translated: number;
+    }
+  | {
+      type: "complete";
+      document_id: string;
+      completed: number;
+      total: number;
+      translated: number;
+    }
+  | {
+      type: "error";
+      document_id?: string;
+      segment_id?: string;
+      message: string;
+    };
+
+async function streamNdjson<T>(
+  path: string,
+  body: Record<string, unknown>,
+  onEvent: StreamEventHandler<T>,
+  signal?: AbortSignal,
+): Promise<void> {
+  const response = await fetch(buildApiUrl(path), {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...(backendAuthUserId ? { "X-Clerk-User-Id": backendAuthUserId } : {}),
+    },
+    body: JSON.stringify(body),
+    signal,
+  });
+
+  if (!response.ok) {
+    throw new Error(`Streaming request failed with status ${response.status}.`);
+  }
+
+  if (!response.body) {
+    throw new Error("Streaming response did not include a readable body.");
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split("\n");
+    buffer = lines.pop() ?? "";
+
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      onEvent(JSON.parse(trimmed) as T);
+    }
+  }
+
+  const finalChunk = buffer.trim();
+  if (finalChunk) {
+    onEvent(JSON.parse(finalChunk) as T);
+  }
 }
 
 export interface TranslateInfoResponse {
@@ -157,6 +347,71 @@ export interface ShareParticipant extends ShareRecipient {
   role: "owner" | "recipient";
 }
 
+export type CollaboratorRole = "owner" | "editor" | "viewer";
+
+export interface DocumentCollaborator {
+  id: string;
+  documentId: string;
+  collaboratorClerkUserId: string;
+  collaboratorEmail: string;
+  collaboratorName: string | null;
+  role: CollaboratorRole;
+  addedByClerkUserId: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface DocumentCollaboratorsResponse {
+  documentId: string;
+  currentRole: CollaboratorRole;
+  collaborators: DocumentCollaborator[];
+}
+
+export interface DocumentPresenceUser {
+  id: string;
+  documentId: string;
+  collaboratorClerkUserId: string;
+  collaboratorEmail: string;
+  collaboratorName: string | null;
+  role: CollaboratorRole;
+  lastSeenAt: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface DocumentPresenceResponse {
+  documentId: string;
+  currentRole: CollaboratorRole;
+  activeUsers: DocumentPresenceUser[];
+}
+
+export interface CollaborationAssignment {
+  segment_id: string;
+  document_id: string;
+  assigned_to_clerk_user_id: string;
+  assigned_to_email: string;
+  assigned_to_name?: string | null;
+  assigned_by_clerk_user_id: string;
+  updated_at?: string | null;
+}
+
+
+
+export interface BackendDocumentCollaborator {
+  document_id: string;
+  collaborator_clerk_user_id: string;
+  collaborator_email: string;
+  collaborator_name?: string | null;
+  role: CollaboratorRole;
+}
+
+export interface CollaborationStateResponse {
+  document_id: string;
+  current_role: CollaboratorRole;
+  collaborators: BackendDocumentCollaborator[];
+  assignments: CollaborationAssignment[];
+}
+
 export interface ShareOverviewResponse {
   ownedByDocument: Record<
     string,
@@ -177,6 +432,11 @@ export interface ShareOverviewResponse {
   receivedDocumentIds: string[];
 }
 
+export interface DashboardOverviewResponse {
+  documents: DocumentSummary[];
+  shareOverview: ShareOverviewResponse;
+}
+
 export async function uploadDocument(
   file: File,
   onUploadProgress?: (progress: number) => void,
@@ -194,13 +454,31 @@ export async function uploadDocument(
 }
 
 export async function getDocument(id: string) {
-  const res = await apiClient.get(`/document/${id}`);
-  return res.data;
+  const response = await fetch(`/api/documents/${id}`, {
+    method: 'GET',
+    cache: 'no-store',
+  });
+
+  if (!response.ok) {
+    throw new Error('Failed to load document.');
+  }
+
+  return response.json();
 }
 
 export async function getDocuments(): Promise<DocumentSummary[]> {
-  const res = await apiClient.get<DocumentSummary[]>("/documents");
-  return res.data;
+  return deduplicate('getDocuments', async () => {
+    const response = await fetch('/api/documents', {
+      method: 'GET',
+      cache: 'no-store',
+    });
+
+    if (!response.ok) {
+      throw new Error('Failed to load documents.');
+    }
+
+    return response.json();
+  });
 }
 
 export async function deleteDocument(id: string): Promise<void> {
@@ -214,8 +492,27 @@ export async function validateDocument(
   const res = await apiClient.post<ValidationResult[]>("/validate", {
     document_id: documentId,
     auto_fix: autoFix,
+  }, {
+    timeout: 0,
   });
   return res.data;
+}
+
+export async function streamValidateDocument(
+  documentId: string,
+  autoFix: boolean,
+  onEvent: StreamEventHandler<ValidationStreamEvent>,
+  signal?: AbortSignal,
+): Promise<void> {
+  await streamNdjson<ValidationStreamEvent>(
+    "/validate/stream",
+    {
+      document_id: documentId,
+      auto_fix: autoFix,
+    },
+    onEvent,
+    signal,
+  );
 }
 
 export async function applyValidationFixes(
@@ -269,16 +566,118 @@ export async function translateDocument(
   return res.data;
 }
 
+export async function streamTranslateDocument(
+  documentId: string,
+  targetLanguage: string,
+  styleRules: string[] | undefined,
+  segmentIds: string[] | undefined,
+  forceLlmSegmentIds: string[] | undefined,
+  onEvent: StreamEventHandler<TranslationStreamEvent>,
+  signal?: AbortSignal,
+): Promise<void> {
+  await streamNdjson<TranslationStreamEvent>(
+    "/translate/stream",
+    {
+      document_id: documentId,
+      target_language: targetLanguage,
+      style_rules: styleRules ?? [],
+      segment_ids: segmentIds,
+      force_llm_segment_ids: forceLlmSegmentIds,
+    },
+    onEvent,
+    signal,
+  );
+}
+
 export async function getSegments(
   docId: string,
   status?: string,
   type?: string,
 ): Promise<Segment[]> {
-  const res = await apiClient.get<Segment[]>(`/segments/${docId}`, {
-    params: { status, type },
+  const key = `getSegments:${docId}:${status ?? ''}:${type ?? ''}`;
+  return deduplicate(key, async () => {
+    const params = new URLSearchParams();
+    if (status) params.set('status', status);
+    if (type) params.set('type', type);
+
+    const url = params.toString()
+      ? `/api/documents/${docId}/segments?${params.toString()}`
+      : `/api/documents/${docId}/segments`;
+
+    const response = await fetch(url, {
+      method: 'GET',
+      cache: 'no-store',
+    });
+
+    if (!response.ok) {
+      throw new Error('Failed to load segments.');
+    }
+
+    return response.json();
   });
+}
+
+export async function getCollaborationState(
+  documentId: string,
+): Promise<CollaborationStateResponse> {
+  const res = await apiClient.get<CollaborationStateResponse>(
+    `/collaboration/document/${documentId}`,
+    { timeout: 0 },
+  );
   return res.data;
 }
+
+export async function assignSegments(
+  documentId: string,
+  segmentIds: string[],
+  assigneeClerkUserId: string,
+): Promise<{ document_id: string; assignments: CollaborationAssignment[] }> {
+  const response = await fetch('/api/collaboration/assign', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      document_id: documentId,
+      segment_ids: segmentIds,
+      assignee_clerk_user_id: assigneeClerkUserId,
+    }),
+  })
+
+  if (!response.ok) {
+    const payload = (await response.json().catch(() => null)) as { error?: string } | null
+    throw new Error(payload?.error || 'Failed to assign segments.')
+  }
+
+  return response.json()
+}
+
+export async function claimSegments(
+  documentId: string,
+  segmentIds: string[],
+  assigneeClerkUserId: string,
+): Promise<{ document_id: string; assignments: CollaborationAssignment[] }> {
+  const response = await fetch('/api/collaboration/claim', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      document_id: documentId,
+      segment_ids: segmentIds,
+      assignee_clerk_user_id: assigneeClerkUserId,
+    }),
+  })
+
+  if (!response.ok) {
+    const payload = (await response.json().catch(() => null)) as { error?: string } | null
+    throw new Error(payload?.error || 'Failed to claim segments.')
+  }
+
+  return response.json()
+}
+
+
 
 export async function approveSegment(
   segmentId: string,
@@ -291,6 +690,28 @@ export async function approveSegment(
     correction,
   });
   return res.data;
+}
+
+export async function approveSegmentsBatch(
+  approvals: Array<{ segment_id: string; correction?: string }>,
+): Promise<{
+  succeeded: ApproveResponse[]
+  failed: Array<{ segment_id: string; error: string }>
+}> {
+  const response = await fetch('/api/review/approve/batch', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ approvals }),
+  })
+
+  if (!response.ok) {
+    const payload = (await response.json().catch(() => null)) as { error?: string } | null
+    throw new Error(payload?.error || 'Failed to approve segments in batch.')
+  }
+
+  return response.json()
 }
 
 export async function getGlossary(): Promise<GlossaryResponse> {
@@ -377,15 +798,158 @@ export async function createShareLink(
   return response.json();
 }
 
-export async function getShareOverview(): Promise<ShareOverviewResponse> {
-  const response = await fetch("/api/shares", {
-    method: "GET",
-    cache: "no-store",
+export async function registerDocumentOwner(documentId: string): Promise<void> {
+  const response = await fetch("/api/documents/register", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ documentId }),
   });
 
   if (!response.ok) {
-    throw new Error("Failed to load share overview.");
+    throw new Error("Failed to register document owner.");
+  }
+}
+
+export async function getDocumentCollaborators(
+  documentId: string,
+): Promise<DocumentCollaboratorsResponse> {
+  const key = `getCollaborators:${documentId}`;
+  return deduplicate(key, async () => {
+    const response = await fetch(`/api/documents/${documentId}/collaborators`, {
+      method: "GET",
+      cache: "no-store",
+    });
+
+    if (!response.ok) {
+      throw new Error("Failed to load collaborators.");
+    }
+
+    return response.json();
+  });
+}
+
+export async function addDocumentCollaborator(
+  documentId: string,
+  email: string,
+  role: Exclude<CollaboratorRole, "owner">,
+): Promise<DocumentCollaboratorsResponse> {
+  const response = await fetch(`/api/documents/${documentId}/collaborators`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ email, role }),
+  });
+
+  if (!response.ok) {
+    const payload = (await response.json().catch(() => null)) as { error?: string } | null;
+    throw new Error(payload?.error || "Failed to add collaborator.");
   }
 
   return response.json();
+}
+
+export async function removeDocumentCollaborator(
+  documentId: string,
+  collaboratorClerkUserId: string,
+): Promise<DocumentCollaboratorsResponse> {
+  const response = await fetch(`/api/documents/${documentId}/collaborators`, {
+    method: "DELETE",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ collaboratorClerkUserId }),
+  });
+
+  if (!response.ok) {
+    const payload = (await response.json().catch(() => null)) as { error?: string } | null;
+    throw new Error(payload?.error || "Failed to remove collaborator.");
+  }
+
+  return response.json();
+}
+
+export async function getDocumentPresence(
+  documentId: string,
+): Promise<DocumentPresenceResponse> {
+  const key = `getPresence:${documentId}`;
+  return deduplicate(key, async () => {
+    const response = await fetch(`/api/documents/${documentId}/presence`, {
+      method: "GET",
+      cache: "no-store",
+    });
+
+    if (!response.ok) {
+      const payload = (await response.json().catch(() => null)) as { error?: string } | null;
+      throw new Error(payload?.error || "Failed to load presence.");
+    }
+
+    return response.json();
+  });
+}
+
+export async function heartbeatDocumentPresence(
+  documentId: string,
+): Promise<DocumentPresenceResponse> {
+  const response = await fetch(`/api/documents/${documentId}/presence`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+  });
+
+  if (!response.ok) {
+    const payload = (await response.json().catch(() => null)) as { error?: string } | null;
+    throw new Error(payload?.error || "Failed to update presence.");
+  }
+
+  return response.json();
+}
+
+export async function clearDocumentPresence(
+  documentId: string,
+): Promise<void> {
+  const response = await fetch(`/api/documents/${documentId}/presence`, {
+    method: "DELETE",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    keepalive: true,
+  });
+
+  if (!response.ok) {
+    throw new Error("Failed to clear presence.");
+  }
+}
+
+export async function getShareOverview(): Promise<ShareOverviewResponse> {
+  return deduplicate('getShareOverview', async () => {
+    const response = await fetch("/api/shares", {
+      method: "GET",
+      cache: "no-store",
+    });
+
+    if (!response.ok) {
+      throw new Error("Failed to load share overview.");
+    }
+
+    return response.json();
+  });
+}
+
+export async function getDashboardOverview(): Promise<DashboardOverviewResponse> {
+  return deduplicate('getDashboardOverview', async () => {
+    const response = await fetch('/api/dashboard', {
+      method: 'GET',
+      cache: 'no-store',
+    })
+
+    if (!response.ok) {
+      throw new Error('Failed to load dashboard overview.')
+    }
+
+    return response.json()
+  })
 }
