@@ -65,6 +65,7 @@ import {
   getExportStatus,
   getSegments,
   heartbeatDocumentPresence,
+  registerDocumentOwner,
   streamTranslateDocument,
   type CollaboratorRole,
   type DocumentCollaboratorsResponse,
@@ -823,7 +824,8 @@ function TranslatePageContent() {
 
   const canModifyWorkspace =
     currentRole === "owner" || currentRole === "editor";
-  const canApproveSegments = currentRole === "editor";
+  const canApproveSegments =
+    currentRole === "owner" || currentRole === "editor";
   const assignableCollaborators = useMemo(
     () =>
       (collaboratorData?.collaborators ?? []).filter(
@@ -831,6 +833,25 @@ function TranslatePageContent() {
       ),
     [collaboratorData],
   );
+
+  useEffect(() => {
+    if (currentRole !== "owner") return;
+    if (assignableCollaborators.length === 0) {
+      if (selectedAssignee) {
+        setSelectedAssignee("");
+      }
+      return;
+    }
+
+    const selectedStillValid = assignableCollaborators.some(
+      (collaborator) =>
+        collaborator.collaboratorClerkUserId === selectedAssignee,
+    );
+
+    if (!selectedStillValid) {
+      setSelectedAssignee(assignableCollaborators[0].collaboratorClerkUserId);
+    }
+  }, [assignableCollaborators, currentRole, selectedAssignee]);
 
 
 
@@ -842,6 +863,7 @@ function TranslatePageContent() {
 
   const canApproveSegment = (segment: WorkspaceSegment) => {
     if (!canApproveSegments) return false;
+    if (currentRole === "owner") return true;
     return segment.assigned_to_clerk_user_id === userId;
   };
 
@@ -917,13 +939,20 @@ function TranslatePageContent() {
     }
 
     let cancelled = false;
+    let bootstrapAttempted = false;
     setAccessLoading(true);
     setAccessDenied(null);
 
-    void Promise.all([
-      getDocumentCollaborators(docId),
-      heartbeatDocumentPresence(docId),
-    ])
+    const bootstrapAccess = async () => {
+      await registerDocumentOwner(docId).catch(() => undefined);
+
+      return Promise.all([
+        getDocumentCollaborators(docId),
+        heartbeatDocumentPresence(docId),
+      ]);
+    };
+
+    void bootstrapAccess()
       .then(([collaboratorsResponse, presenceResponse]) => {
         if (cancelled) return;
         setCollaboratorData(collaboratorsResponse);
@@ -938,7 +967,32 @@ function TranslatePageContent() {
         );
         setAccessDenied(null);
       })
-      .catch((error) => {
+      .catch(async (error) => {
+        if (!bootstrapAttempted) {
+          bootstrapAttempted = true;
+          try {
+            const [collaboratorsResponse, presenceResponse] =
+              await bootstrapAccess();
+
+            if (cancelled) return;
+
+            setCollaboratorData(collaboratorsResponse);
+            setPresenceData(presenceResponse);
+            setCurrentRole(collaboratorsResponse.currentRole);
+            setSelectedAssignee((current) =>
+              current ||
+              collaboratorsResponse.collaborators.find(
+                (collaborator) => collaborator.role === "editor",
+              )?.collaboratorClerkUserId ||
+              "",
+            );
+            setAccessDenied(null);
+            return;
+          } catch {
+            // Fall through to the standard access denied flow.
+          }
+        }
+
         if (cancelled) return;
         const message =
           error instanceof Error
@@ -1319,7 +1373,7 @@ function TranslatePageContent() {
     if (!canApproveSegments) {
       toast({
         title: "Approval restricted",
-        description: "Only editors can approve segments in the shared workspace.",
+        description: "Only owners and editors can approve segments in the shared workspace.",
         variant: "destructive",
       });
       return;
@@ -1424,7 +1478,7 @@ function TranslatePageContent() {
     if (!canApproveSegments) {
       toast({
         title: "Approval restricted",
-        description: "Only editors can approve segments in the shared workspace.",
+        description: "Only owners and editors can approve segments in the shared workspace.",
         variant: "destructive",
       });
       return;
@@ -1525,8 +1579,23 @@ function TranslatePageContent() {
   };
 
   const handleAssignSelected = async () => {
-    if (!docId || currentRole !== "owner") return;
-    const segmentIds = Array.from(selectedIds);
+    if (!docId) return;
+    if (currentRole !== "owner") {
+      toast({
+        title: "Owner access required",
+        description: "Only the document owner can assign segments to editors.",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    await registerDocumentOwner(docId).catch(() => undefined);
+
+    const segmentIds = Array.from(selectedIds).filter((id) => {
+      const segment = segments.find((item) => item.segment_id === id);
+      return Boolean(segment && segment.status !== "approved");
+    });
+
     if (segmentIds.length === 0 || !selectedAssignee) {
       toast({
         title: "Assignment incomplete",
@@ -1536,9 +1605,28 @@ function TranslatePageContent() {
       return;
     }
 
+    const assigneeIsEditor = assignableCollaborators.some(
+      (collaborator) =>
+        collaborator.collaboratorClerkUserId === selectedAssignee,
+    );
+
+    if (!assigneeIsEditor) {
+      setSelectedAssignee(
+        assignableCollaborators[0]?.collaboratorClerkUserId ?? "",
+      );
+      toast({
+        title: "Choose an editor",
+        description:
+          "The selected assignee is no longer available. Please choose an editor again.",
+        variant: "destructive",
+      });
+      return;
+    }
+
     try {
       await assignSegments(docId, segmentIds, selectedAssignee);
       await loadSegments(statusFilter);
+      setSelectedIds(new Set());
       setTranslationMessage(
         `${segmentIds.length} segment${segmentIds.length === 1 ? "" : "s"} reassigned.`,
       );
@@ -1848,7 +1936,7 @@ function TranslatePageContent() {
                     ? " - viewers can inspect shared progress but cannot edit or approve."
                     : currentRole === "editor"
                       ? " - editors can translate, edit, and approve segments."
-                      : " - owners can manage access and coordinate the workspace."}
+                      : " - owners can manage access, coordinate the workspace, and approve segments."}
                 </p>
               </div>
 
