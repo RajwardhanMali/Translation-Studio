@@ -17,7 +17,6 @@ from app.models.schemas import Segment, ApproveRequest, ApproveResponse
 from app.services.collaboration import (
     attach_collaboration_fields,
     enrich_collaborator,
-    ensure_collaboration_tables,
     get_assignment_map,
     get_current_backend_collaborator,
     require_document_membership,
@@ -44,7 +43,6 @@ async def get_segments(
     doc = db.query(Document).filter(Document.id == document_id).first()
     if not doc:
         raise HTTPException(status_code=404, detail=f"Document '{document_id}' not found.")
-    ensure_collaboration_tables(db)
     membership = require_document_membership(db, document_id, collaborator)
     
     # Owners and Viewers see all segments.
@@ -113,7 +111,6 @@ async def approve_segment(
     seg = db.query(SegmentDB).filter(SegmentDB.id == request.segment_id).first()
     if not seg:
         raise HTTPException(status_code=404, detail=f"Segment '{request.segment_id}' not found.")
-    ensure_collaboration_tables(db)
     collaborator = enrich_collaborator(db, collaborator)
     membership = require_document_role(db, seg.document_id, collaborator, ["owner", "editor"])
     require_segment_assignment(db, seg.document_id, [seg.id], collaborator, membership)

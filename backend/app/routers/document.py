@@ -14,7 +14,6 @@ from app.database import get_db
 from app.models.domain import Document, DocumentCollaborator, Segment
 from app.services.collaboration import (
     enrich_collaborator,
-    ensure_collaboration_tables,
     get_current_backend_collaborator,
     require_document_membership,
     require_document_role,
@@ -43,7 +42,6 @@ async def list_documents(
     Returns filename, type, upload date, block count, and translation
     progress (pending / reviewed / approved segment counts + % complete).
     """
-    ensure_collaboration_tables(db)
     collaborator = enrich_collaborator(db, collaborator)
 
     collaborator_rows = (
@@ -139,7 +137,6 @@ async def get_document(
     Retrieve a parsed document by its ID.
     Returns the full JSON representation including all blocks.
     """
-    ensure_collaboration_tables(db)
     collaborator = enrich_collaborator(db, collaborator)
     require_document_membership(db, document_id, collaborator)
 
@@ -176,7 +173,6 @@ async def delete_document(
     TM entries have foreign key ONDELETE=SET NULL so they are kept.
     Segments have ONDELETE=CASCADE so they are wiped.
     """
-    ensure_collaboration_tables(db)
     collaborator = enrich_collaborator(db, collaborator)
     require_document_role(db, document_id, collaborator, ["owner"])
 

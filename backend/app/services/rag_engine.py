@@ -17,8 +17,7 @@ from app.models.domain import TranslationMemory
 
 logger = logging.getLogger(__name__)
 
-EXACT_THRESHOLD = 0.95
-FUZZY_THRESHOLD = 0.75
+FUZZY_THRESHOLD = 0.91
 SEARCH_TOP_K    = 5
 
 # ── Public API ────────────────────────────────────────────────────────────────
@@ -41,7 +40,7 @@ def classify_segment(
         exact_stmt = (
             select(TranslationMemory)
             .where(TranslationMemory.language == lang)
-            .where(func.lower(func.trim(TranslationMemory.source_text)) == normalized_source)
+            .where(func.lower(func.btrim(TranslationMemory.source_text)) == normalized_source)
             .limit(1)
         )
         exact_entry = db.execute(exact_stmt).scalar_one_or_none()
@@ -61,14 +60,15 @@ def classify_segment(
         stmt = (
             select(TranslationMemory, distance.label("distance"))
             .where(TranslationMemory.language == lang)
+            .where(TranslationMemory.embedding.is_not(None))
             .order_by(distance)
-            .limit(1)
+            .limit(SEARCH_TOP_K)
         )
-        
+
         result = db.execute(stmt).first()
         if not result:
             return "new", None, 0.0
-            
+
         tm_entry, dist = result
         score = 1.0 - float(dist)
 
@@ -76,12 +76,6 @@ def classify_segment(
             return "new", None, score
 
         tm_translation = tm_entry.target_text
-
-        if score >= EXACT_THRESHOLD:
-            logger.info(
-                f"TM exact ({score:.3f}) [{target_language}]: '{source_text[:50]}'"
-            )
-            return "exact", tm_translation, score
 
         logger.info(
             f"TM fuzzy ({score:.3f}) [{target_language}]: '{source_text[:50]}'"
@@ -105,21 +99,21 @@ def store_translation(
         lang = language.lower()
         src_lower = source_text.strip().lower()
 
-        # Check if identical source exists
-        stmt = select(TranslationMemory).where(
-            TranslationMemory.language == lang
-        )
-        existing_entries = db.execute(stmt).scalars().all()
-        
-        for entry in existing_entries:
-            if entry.source_text.strip().lower() == src_lower:
-                # Update existing (human correction overwrites)
+        existing_entries = db.execute(
+            select(TranslationMemory)
+            .where(TranslationMemory.language == lang)
+            .where(func.lower(func.btrim(TranslationMemory.source_text)) == src_lower)
+        ).scalars().all()
+
+        if existing_entries:
+            # Update existing (human correction overwrites all duplicates if any).
+            for entry in existing_entries:
                 entry.target_text = target_text
                 entry.document_id = document_id
                 entry.embedding = embedding.tolist()
-                db.commit()
-                logger.debug(f"TM updated existing entry [{lang}]: '{source_text[:50]}'")
-                return
+            db.commit()
+            logger.debug(f"TM updated existing entry [{lang}]: '{source_text[:50]}'")
+            return
         
         # New entry
         new_entry = TranslationMemory(
@@ -169,9 +163,13 @@ def store_translations_batch(
             return 0
 
         lang = target_language.lower()
-        stmt = select(TranslationMemory).where(TranslationMemory.language == lang)
-        existing_entries = db.execute(stmt).scalars().all()
-        existing_texts = {e.source_text.strip().lower() for e in existing_entries}
+        normalized_sources = {s.strip().lower() for s in sources if s.strip()}
+        existing_rows = db.execute(
+            select(TranslationMemory.source_text)
+            .where(TranslationMemory.language == lang)
+            .where(func.lower(func.btrim(TranslationMemory.source_text)).in_(normalized_sources))
+        ).all()
+        existing_texts = {row[0].strip().lower() for row in existing_rows if row[0]}
 
         added_count = 0
         for seg, emb in zip(eligible, embeddings):

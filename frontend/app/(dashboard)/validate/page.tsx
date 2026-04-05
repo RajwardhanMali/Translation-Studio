@@ -15,6 +15,7 @@ import { useToast } from '@/hooks/use-toast'
 import {
   applyValidationFixes,
   editValidationSegment,
+  registerDocumentOwner,
   streamValidateDocument,
   type ValidationIssue,
   type ValidationResult,
@@ -348,6 +349,14 @@ function ValidationPageContent() {
     }
   }
 
+  const handleContinueToTranslate = async () => {
+    if (docId) {
+      await registerDocumentOwner(docId).catch(() => undefined)
+    }
+
+    router.push(`/translate?doc=${docId}`)
+  }
+
   return (
     <>
       <LayoutHeader
@@ -360,7 +369,7 @@ function ValidationPageContent() {
             <RefreshCw className={cn('mr-1.5 h-3.5 w-3.5', loading && 'animate-spin')} />
             Re-check
           </Button>
-          <Button size="sm" className="rounded-xl" onClick={() => router.push(`/translate?doc=${docId}`)}>
+          <Button size="sm" className="rounded-xl" onClick={() => void handleContinueToTranslate()}>
             Continue
             <ArrowRight className="ml-1.5 h-3.5 w-3.5" />
           </Button>

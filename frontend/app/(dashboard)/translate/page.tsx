@@ -55,16 +55,15 @@ import { Textarea } from "@/components/ui/textarea";
 import { useToast } from "@/hooks/use-toast";
 import {
   approveSegment,
+  approveSegmentsBatch,
   assignSegments,
   claimSegments,
   createShareLink,
   downloadExport,
-  clearDocumentPresence,
+  getCollaborationPresenceWebSocketUrl,
   getDocumentCollaborators,
-  getDocumentPresence,
   getExportStatus,
   getSegments,
-  heartbeatDocumentPresence,
   streamTranslateDocument,
   type CollaboratorRole,
   type DocumentCollaboratorsResponse,
@@ -920,14 +919,15 @@ function TranslatePageContent() {
     setAccessLoading(true);
     setAccessDenied(null);
 
-    void Promise.all([
-      getDocumentCollaborators(docId),
-      heartbeatDocumentPresence(docId),
-    ])
-      .then(([collaboratorsResponse, presenceResponse]) => {
+    void getDocumentCollaborators(docId)
+      .then((collaboratorsResponse) => {
         if (cancelled) return;
         setCollaboratorData(collaboratorsResponse);
-        setPresenceData(presenceResponse);
+        setPresenceData({
+          documentId: docId,
+          currentRole: collaboratorsResponse.currentRole,
+          activeUsers: [],
+        });
         setCurrentRole(collaboratorsResponse.currentRole);
         setSelectedAssignee(
           (current) =>
@@ -960,38 +960,68 @@ function TranslatePageContent() {
   }, [docId]);
 
   useEffect(() => {
-    if (!docId || accessDenied || !currentRole) return;
+    if (!docId || accessDenied || !currentRole || !userId) return;
 
-    const handleBeforeUnload = () => {
-      void clearDocumentPresence(docId).catch(() => undefined);
+    const socket = new WebSocket(
+      getCollaborationPresenceWebSocketUrl(docId, userId),
+    );
+    let pingTimer: number | undefined;
+
+    socket.onopen = () => {
+      pingTimer = window.setInterval(() => {
+        if (socket.readyState === WebSocket.OPEN) {
+          socket.send("ping");
+        }
+      }, 30000);
     };
 
-    const interval = window.setInterval(() => {
-      void heartbeatDocumentPresence(docId)
-        .then((response) => setPresenceData(response))
-        .catch(() => undefined);
-    }, 30000);
+    socket.onmessage = (event) => {
+      try {
+        const payload = JSON.parse(event.data) as {
+          type?: string;
+          document_id?: string;
+          active_users?: Array<{
+            id: string;
+            document_id: string;
+            collaborator_clerk_user_id: string;
+            collaborator_email: string;
+            collaborator_name: string | null;
+            role: CollaboratorRole;
+          }>;
+        };
 
-    window.addEventListener("beforeunload", handleBeforeUnload);
+        if (payload.type !== "presence") {
+          return;
+        }
+
+        const nowIso = new Date().toISOString();
+        setPresenceData({
+          documentId: payload.document_id ?? docId,
+          currentRole,
+          activeUsers: (payload.active_users ?? []).map((user) => ({
+            id: user.id,
+            documentId: user.document_id,
+            collaboratorClerkUserId: user.collaborator_clerk_user_id,
+            collaboratorEmail: user.collaborator_email,
+            collaboratorName: user.collaborator_name,
+            role: user.role,
+            lastSeenAt: nowIso,
+            createdAt: nowIso,
+            updatedAt: nowIso,
+          })),
+        });
+      } catch {
+        // Ignore malformed payloads.
+      }
+    };
 
     return () => {
-      window.removeEventListener("beforeunload", handleBeforeUnload);
-      window.clearInterval(interval);
-      void clearDocumentPresence(docId).catch(() => undefined);
+      if (pingTimer) {
+        window.clearInterval(pingTimer);
+      }
+      socket.close();
     };
-  }, [accessDenied, currentRole, docId]);
-
-  useEffect(() => {
-    if (!docId || accessDenied || !currentRole) return;
-
-    const interval = window.setInterval(() => {
-      void getDocumentPresence(docId)
-        .then((response) => setPresenceData(response))
-        .catch(() => undefined);
-    }, 10000);
-
-    return () => window.clearInterval(interval);
-  }, [accessDenied, currentRole, docId]);
+  }, [accessDenied, currentRole, docId, userId]);
 
   useEffect(() => {
     if (!docId) return;
@@ -1161,7 +1191,11 @@ function TranslatePageContent() {
 
   const startTranslationStream = async (
     segmentIds: string[],
-    options?: { isRetry?: boolean; retrySegmentId?: string },
+    options?: {
+      isRetry?: boolean;
+      retrySegmentId?: string;
+      forceLlmSegmentIds?: string[];
+    },
   ) => {
     streamControllerRef.current?.abort();
     const controller = new AbortController();
@@ -1183,6 +1217,7 @@ function TranslatePageContent() {
         targetLangRef.current,
         [],
         segmentIds,
+        options?.forceLlmSegmentIds,
         (event: TranslationStreamEvent) => {
           if (event.type === "start") {
             latestTotal = event.total_segments;
@@ -1300,6 +1335,7 @@ function TranslatePageContent() {
     await startTranslationStream([segment.segment_id], {
       isRetry: true,
       retrySegmentId: segment.segment_id,
+      forceLlmSegmentIds: [segment.segment_id],
     });
   };
 
@@ -1464,19 +1500,68 @@ function TranslatePageContent() {
       return;
     }
 
-    for (const segment of approvableSegments) {
-      await handleApprove(segment, getSegmentOutputText(segment), {
-        silentSuccess: true,
-        skipConfirm: true,
-      });
-    }
-    setSelectedIds(new Set());
-    if (count > 0) {
-      toast({ title: `${count} segments approved` });
-    } else {
+    if (count === 0) {
       toast({
         title: "No translated segments selected",
         description: "Only translated segments can be approved.",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    try {
+      const result = await approveSegmentsBatch(
+        approvableSegments.map((segment) => ({
+          segment_id: segment.segment_id,
+          correction: getSegmentOutputText(segment),
+        })),
+      );
+
+      setOutputOverrides((prev) => {
+        const next = { ...prev };
+        for (const item of result.succeeded) {
+          delete next[item.segment_id];
+        }
+        return next;
+      });
+
+      if (statusFilter === "all") {
+        const succeededById = new Map(
+          result.succeeded.map((item) => [item.segment_id, item]),
+        );
+        setSegments((prev) =>
+          prev.map((segment) => {
+            const approved = succeededById.get(segment.segment_id);
+            if (!approved) return segment;
+            return {
+              ...segment,
+              status: approved.status as Segment["status"],
+              final_text: approved.final_text,
+            };
+          }),
+        );
+      } else {
+        await loadSegments(statusFilter);
+      }
+
+      const exportData = await getExportStatus(docId).catch(() => null);
+      setExportStatus(exportData);
+
+      setSelectedIds(new Set());
+
+      if (result.failed.length === 0) {
+        toast({ title: `${result.succeeded.length} segments approved` });
+      } else {
+        toast({
+          title: `Approved ${result.succeeded.length}, failed ${result.failed.length}`,
+          description: "Some selected segments could not be approved.",
+          variant: "destructive",
+        });
+      }
+    } catch {
+      toast({
+        title: "Batch approval failed",
+        description: "Could not approve selected segments right now.",
         variant: "destructive",
       });
     }
@@ -1514,19 +1599,39 @@ function TranslatePageContent() {
 
   const handleClaimSelected = async () => {
     if (!docId || !userId || !canModifyWorkspace) return;
-    const segmentIds = Array.from(selectedIds);
+    const segmentIds = Array.from(selectedIds).filter((id) => {
+      const segment = segments.find((item) => item.segment_id === id);
+      return Boolean(segment && segment.status !== "approved");
+    });
     if (segmentIds.length === 0) {
       toast({
-        title: "No segments selected",
-        description: "Select one or more segments to claim.",
+        title: "No eligible segments selected",
+        description: "Select one or more non-approved segments to claim.",
         variant: "destructive",
       });
       return;
     }
 
     try {
-      await claimSegments(docId, segmentIds, userId);
-      await loadSegments(statusFilter);
+      const response = await claimSegments(docId, segmentIds, userId);
+      const assignmentBySegment = new Map(
+        response.assignments.map((assignment) => [assignment.segment_id, assignment]),
+      );
+
+      setSegments((prev) =>
+        prev.map((segment) => {
+          const assignment = assignmentBySegment.get(segment.segment_id);
+          if (!assignment) return segment;
+
+          return {
+            ...segment,
+            assigned_to_clerk_user_id: assignment.assigned_to_clerk_user_id,
+            assigned_to_email: assignment.assigned_to_email,
+            assigned_to_name: assignment.assigned_to_name ?? null,
+          };
+        }),
+      );
+      setSelectedIds(new Set());
       setTranslationMessage(
         `${segmentIds.length} segment${segmentIds.length === 1 ? "" : "s"} assigned to you.`,
       );
@@ -1543,8 +1648,21 @@ function TranslatePageContent() {
   };
 
   const handleAssignSelected = async () => {
-    if (!docId || currentRole !== "owner") return;
-    const segmentIds = Array.from(selectedIds);
+    if (!docId) return;
+    if (currentRole !== "owner") {
+      toast({
+        title: "Owner access required",
+        description: "Only the document owner can assign segments to editors.",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    const segmentIds = Array.from(selectedIds).filter((id) => {
+      const segment = segments.find((item) => item.segment_id === id);
+      return Boolean(segment && segment.status !== "approved");
+    });
+
     if (segmentIds.length === 0 || !selectedAssignee) {
       toast({
         title: "Assignment incomplete",
@@ -1554,9 +1672,44 @@ function TranslatePageContent() {
       return;
     }
 
+    const assigneeIsEditor = assignableCollaborators.some(
+      (collaborator) =>
+        collaborator.collaboratorClerkUserId === selectedAssignee,
+    );
+
+    if (!assigneeIsEditor) {
+      setSelectedAssignee(
+        assignableCollaborators[0]?.collaboratorClerkUserId ?? "",
+      );
+      toast({
+        title: "Choose an editor",
+        description:
+          "The selected assignee is no longer available. Please choose an editor again.",
+        variant: "destructive",
+      });
+      return;
+    }
+
     try {
-      await assignSegments(docId, segmentIds, selectedAssignee);
-      await loadSegments(statusFilter);
+      const response = await assignSegments(docId, segmentIds, selectedAssignee);
+      const assignmentBySegment = new Map(
+        response.assignments.map((assignment) => [assignment.segment_id, assignment]),
+      );
+
+      setSegments((prev) =>
+        prev.map((segment) => {
+          const assignment = assignmentBySegment.get(segment.segment_id);
+          if (!assignment) return segment;
+
+          return {
+            ...segment,
+            assigned_to_clerk_user_id: assignment.assigned_to_clerk_user_id,
+            assigned_to_email: assignment.assigned_to_email,
+            assigned_to_name: assignment.assigned_to_name ?? null,
+          };
+        }),
+      );
+      setSelectedIds(new Set());
       setTranslationMessage(
         `${segmentIds.length} segment${segmentIds.length === 1 ? "" : "s"} reassigned.`,
       );

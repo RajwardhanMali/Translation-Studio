@@ -1,92 +1,145 @@
-import pytest
 import numpy as np
-from pathlib import Path
 
-from app.services.rag_engine import (
-    TranslationMemory,
-    get_tm,
-    store_translation,
-    classify_segment,
-    store_translations_batch,
-    EXACT_THRESHOLD
-)
-from app.utils.file_handler import FAISS_DIR
+from app.services import rag_engine
 
-def test_language_bleed_fix():
-    tm = TranslationMemory()
-    # Fake vector for "Hello"
-    fake_vec = np.ones((1, 384)).astype(np.float32)
 
-    # 1. Fill TM with "Hello" in 60 different other languages
-    # This proves the new architecture handles 50+ matches cleanly
-    for i in range(60):
-        lang = f"lang_{i}"
-        tm.add_entry(
-            embedding=fake_vec.copy(),
-            source_text="Hello",
-            target_text=f"Hello_{lang}",
-            language=lang,
-        )
-    
-    # 2. Add the actual target language we want (e.g. French)
-    tm.add_entry(
-        embedding=fake_vec.copy(),
+class _FakeScalarResult:
+    def __init__(self, value):
+        self._value = value
+
+    def scalar_one_or_none(self):
+        return self._value
+
+
+class _FakeScalars:
+    def __init__(self, values):
+        self._values = values
+
+    def all(self):
+        return self._values
+
+
+class _FakeExecuteResult:
+    def __init__(self, *, first_value=None, scalar_value=None, scalars_values=None):
+        self._first_value = first_value
+        self._scalar_value = scalar_value
+        self._scalars_values = scalars_values or []
+
+    def first(self):
+        return self._first_value
+
+    def scalar_one_or_none(self):
+        return self._scalar_value
+
+    def scalars(self):
+        return _FakeScalars(self._scalars_values)
+
+    def all(self):
+        return self._scalars_values
+
+
+class _FakeSession:
+    def __init__(self, execute_results):
+        self._execute_results = list(execute_results)
+        self.commits = 0
+        self.closed = False
+        self.added = []
+
+    def execute(self, _stmt):
+        return self._execute_results.pop(0)
+
+    def add(self, value):
+        self.added.append(value)
+
+    def commit(self):
+        self.commits += 1
+
+    def close(self):
+        self.closed = True
+
+
+def test_classify_segment_prefers_exact_match(monkeypatch):
+    exact_entry = type("TM", (), {"target_text": "Bonjour"})()
+    db = _FakeSession([
+        _FakeExecuteResult(scalar_value=exact_entry),
+    ])
+
+    monkeypatch.setattr(rag_engine, "SessionLocal", lambda: db)
+
+    match_type, translation, score = rag_engine.classify_segment(
         source_text="Hello",
-        target_text="Bonjour",
-        language="fr",
+        embedding=np.ones((384,), dtype=np.float32),
+        target_language="fr",
     )
 
-    # 3. Query TM for "fr". 
-    # If the truncation bug existed (K=50 monolithic index), "fr" might be truncated out.
-    meta, score = tm.search(fake_vec, target_language="fr")
-    
-    assert meta is not None
-    assert meta["target_text"] == "Bonjour"
-    assert meta["language"] == "fr"
-    # Should be an exact match
-    assert score >= EXACT_THRESHOLD
+    assert match_type == "exact"
+    assert translation == "Bonjour"
+    assert score == 1.0
+    assert db.closed is True
 
-def test_tm_update_correction():
-    tm = TranslationMemory()
-    vec = np.zeros((1, 384)).astype(np.float32)
-    
-    tm.add_entry(embedding=vec, source_text="Test", target_text="Old", language="fr")
-    
-    # User provides a correction, overrides existing entry
-    tm.add_entry(embedding=vec, source_text="Test", target_text="New Cor", language="fr")
-    
-    meta, score = tm.search(vec, target_language="fr")
-    assert meta["target_text"] == "New Cor"
 
-def test_store_batch_skips_duplicates_unless_correction():
-    tm = TranslationMemory()
-    vec = np.random.rand(1, 384).astype(np.float32)
-    
-    entries = [
-        {
-            "embedding": vec,
-            "source_text": "Batch1",
-            "target_text": "Trans1",
-            "language": "es",
-            "is_correction": False
-        }
-    ]
-    tm.add_entries_batch(entries)
-    
-    # Try adding again (auto-translation doesn't replace it or duplicate it)
-    entries[0]["target_text"] = "Trans1_diff"
-    added = tm.add_entries_batch(entries)
-    assert added == 0  # skipped
-    
-    # Verify not overwritten
-    meta, score = tm.search(vec, "es")
-    assert meta["target_text"] == "Trans1"
-    
-    # Now provide as correction
-    entries[0]["target_text"] = "Trans1_correction"
-    entries[0]["is_correction"] = True
-    added = tm.add_entries_batch(entries)
-    
-    # Verify overwritten
-    meta, score = tm.search(vec, "es")
-    assert meta["target_text"] == "Trans1_correction"
+def test_classify_segment_returns_fuzzy_above_threshold(monkeypatch):
+    tm_entry = type("TM", (), {"target_text": "Salut", "embedding": type("Vec", (), {"cosine_distance": lambda self, _vec: 0.0})()})()
+    db = _FakeSession([
+        _FakeExecuteResult(scalar_value=None),
+        _FakeExecuteResult(first_value=(tm_entry, 0.08)),
+    ])
+
+    monkeypatch.setattr(rag_engine, "SessionLocal", lambda: db)
+
+    match_type, translation, score = rag_engine.classify_segment(
+        source_text="Hi",
+        embedding=np.ones((384,), dtype=np.float32),
+        target_language="fr",
+    )
+
+    assert match_type == "fuzzy"
+    assert translation == "Salut"
+    assert score > rag_engine.FUZZY_THRESHOLD
+    assert db.closed is True
+
+
+def test_classify_segment_returns_new_below_threshold(monkeypatch):
+    tm_entry = type("TM", (), {"target_text": "Hola", "embedding": type("Vec", (), {"cosine_distance": lambda self, _vec: 0.0})()})()
+    db = _FakeSession([
+        _FakeExecuteResult(scalar_value=None),
+        _FakeExecuteResult(first_value=(tm_entry, 0.2)),
+    ])
+
+    monkeypatch.setattr(rag_engine, "SessionLocal", lambda: db)
+
+    match_type, translation, score = rag_engine.classify_segment(
+        source_text="Hello",
+        embedding=np.ones((384,), dtype=np.float32),
+        target_language="es",
+    )
+
+    assert match_type == "new"
+    assert translation is None
+    assert score < rag_engine.FUZZY_THRESHOLD
+    assert db.closed is True
+
+
+def test_store_translation_overwrites_all_matching_entries(monkeypatch):
+    entry_a = type("TM", (), {"target_text": "OldA", "document_id": "doc-old", "embedding": None})()
+    entry_b = type("TM", (), {"target_text": "OldB", "document_id": "doc-old", "embedding": None})()
+    db = _FakeSession([
+        _FakeExecuteResult(scalars_values=[entry_a, entry_b]),
+    ])
+
+    monkeypatch.setattr(rag_engine, "SessionLocal", lambda: db)
+
+    rag_engine.store_translation(
+        source_text="Hello",
+        target_text="Bonjour final",
+        language="fr",
+        embedding=np.ones((384,), dtype=np.float32),
+        document_id="doc-new",
+    )
+
+    assert entry_a.target_text == "Bonjour final"
+    assert entry_b.target_text == "Bonjour final"
+    assert entry_a.document_id == "doc-new"
+    assert entry_b.document_id == "doc-new"
+    assert db.commits == 1
+    assert db.closed is True

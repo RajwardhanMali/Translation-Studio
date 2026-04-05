@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { ClerkProvider } from "@clerk/nextjs";
 import { Analytics } from "@vercel/analytics/next";
 import { MotionProvider } from "@/components/motion/primitives";
+import { AuthSync } from "@/components/auth/auth-sync";
 import { ThemeProvider } from "@/components/theme-provider";
 import { Toaster } from "@/components/ui/toaster";
 import "./globals.css";
@@ -30,6 +31,7 @@ export default function RootLayout({
             themes={['light', 'dark', 'rose', 'blue', 'green', 'amber', 'purple']}
           >
             <MotionProvider>
+              <AuthSync />
               {children}
               <Toaster />
               <Analytics />
