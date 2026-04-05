@@ -81,6 +81,9 @@ class Segment(BaseModel):
     row_count: Optional[int] = None
     col_count: Optional[int] = None
     col_widths: Optional[List[float]] = None
+    assigned_to_clerk_user_id: Optional[str] = None
+    assigned_to_name: Optional[str] = None
+    assigned_to_email: Optional[str] = None
     created_at: str = Field(default_factory=lambda: datetime.utcnow().isoformat())
     updated_at: str = Field(default_factory=lambda: datetime.utcnow().isoformat())
 
@@ -278,3 +281,49 @@ class LLMBackendInfo(BaseModel):
     model: Optional[str] = None
     host: Optional[str] = None
     key_set: Optional[bool] = None
+
+
+# ---------------------------------------------------------------------------
+# Collaboration schemas
+# ---------------------------------------------------------------------------
+
+class SegmentAssignmentState(BaseModel):
+    segment_id: str
+    document_id: str
+    assigned_to_clerk_user_id: str
+    assigned_to_email: str
+    assigned_to_name: Optional[str] = None
+    assigned_by_clerk_user_id: str
+    updated_at: Optional[str] = None
+
+
+
+
+
+class DocumentCollaboratorState(BaseModel):
+    document_id: str
+    collaborator_clerk_user_id: str
+    collaborator_email: str
+    collaborator_name: Optional[str] = None
+    role: str
+
+
+class CollaborationStateResponse(BaseModel):
+    document_id: str
+    current_role: str
+    collaborators: List[DocumentCollaboratorState]
+    assignments: List[SegmentAssignmentState]
+
+
+class AssignSegmentsRequest(BaseModel):
+    document_id: str
+    segment_ids: List[str]
+    assignee_clerk_user_id: str
+
+
+class AssignSegmentsResponse(BaseModel):
+    document_id: str
+    assignments: List[SegmentAssignmentState]
+
+
+

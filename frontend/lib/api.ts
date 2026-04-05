@@ -2,6 +2,7 @@ import axios from "axios";
 
 const BASE_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 const NORMALIZED_BASE_URL = BASE_URL.replace(/\/+$/, "");
+let backendAuthUserId: string | null = null;
 
 function buildApiUrl(path: string) {
   return `${NORMALIZED_BASE_URL}/${path.replace(/^\/+/, "")}`;
@@ -11,6 +12,35 @@ export const apiClient = axios.create({
   baseURL: BASE_URL,
   timeout: 30000,
 });
+
+// Deduplication map for concurrent GET requests
+const ongoingRequests = new Map<string, Promise<any>>();
+
+/**
+ * Wraps a promise-returning function with deduplication based on a unique key.
+ * Only one request for the same key will be in-flight at a time.
+ */
+function deduplicate<T>(key: string, fn: () => Promise<T>): Promise<T> {
+  const existing = ongoingRequests.get(key);
+  if (existing) return existing;
+
+  const promise = fn().finally(() => {
+    ongoingRequests.delete(key);
+  });
+
+  ongoingRequests.set(key, promise);
+  return promise;
+}
+
+export function setBackendAuthUserId(userId: string | null) {
+  backendAuthUserId = userId;
+
+  if (userId) {
+    apiClient.defaults.headers.common["X-Clerk-User-Id"] = userId;
+  } else {
+    delete apiClient.defaults.headers.common["X-Clerk-User-Id"];
+  }
+}
 
 type StreamEventHandler<T> = (event: T) => void;
 
@@ -35,6 +65,9 @@ export interface DocumentSummary {
     approved: number;
   };
   translation_progress: number;
+  owner_clerk_user_id?: string | null;
+  access_role?: CollaboratorRole | null;
+  is_owner?: boolean;
 }
 
 export interface ValidationIssue {
@@ -146,6 +179,9 @@ export interface Segment {
   format_snapshot?: SegmentFormatSnapshot | null;
   row?: number | null;
   col?: number | null;
+  assigned_to_clerk_user_id?: string | null;
+  assigned_to_name?: string | null;
+  assigned_to_email?: string | null;
 }
 
 export interface GlossaryTerm {
@@ -221,6 +257,7 @@ async function streamNdjson<T>(
     method: "POST",
     headers: {
       "Content-Type": "application/json",
+      ...(backendAuthUserId ? { "X-Clerk-User-Id": backendAuthUserId } : {}),
     },
     body: JSON.stringify(body),
     signal,
@@ -290,6 +327,69 @@ export interface ShareParticipant extends ShareRecipient {
   role: "owner" | "recipient";
 }
 
+export type CollaboratorRole = "owner" | "editor" | "viewer";
+
+export interface DocumentCollaborator {
+  id: string;
+  documentId: string;
+  collaboratorClerkUserId: string;
+  collaboratorEmail: string;
+  collaboratorName: string | null;
+  role: CollaboratorRole;
+  addedByClerkUserId: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface DocumentCollaboratorsResponse {
+  documentId: string;
+  currentRole: CollaboratorRole;
+  collaborators: DocumentCollaborator[];
+}
+
+export interface DocumentPresenceUser {
+  id: string;
+  documentId: string;
+  collaboratorClerkUserId: string;
+  collaboratorEmail: string;
+  collaboratorName: string | null;
+  role: CollaboratorRole;
+  lastSeenAt: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface DocumentPresenceResponse {
+  documentId: string;
+  currentRole: CollaboratorRole;
+  activeUsers: DocumentPresenceUser[];
+}
+
+export interface CollaborationAssignment {
+  segment_id: string;
+  document_id: string;
+  assigned_to_clerk_user_id: string;
+  assigned_to_email: string;
+  assigned_to_name?: string | null;
+  assigned_by_clerk_user_id: string;
+  updated_at?: string | null;
+}
+
+export interface BackendDocumentCollaborator {
+  document_id: string;
+  collaborator_clerk_user_id: string;
+  collaborator_email: string;
+  collaborator_name?: string | null;
+  role: CollaboratorRole;
+}
+
+export interface CollaborationStateResponse {
+  document_id: string;
+  current_role: CollaboratorRole;
+  collaborators: BackendDocumentCollaborator[];
+  assignments: CollaborationAssignment[];
+}
+
 export interface ShareOverviewResponse {
   ownedByDocument: Record<
     string,
@@ -332,8 +432,10 @@ export async function getDocument(id: string) {
 }
 
 export async function getDocuments(): Promise<DocumentSummary[]> {
-  const res = await apiClient.get<DocumentSummary[]>("/documents");
-  return res.data;
+  return deduplicate("getDocuments", async () => {
+    const res = await apiClient.get<DocumentSummary[]>("/documents");
+    return res.data;
+  });
 }
 
 export async function deleteDocument(id: string): Promise<void> {
@@ -344,12 +446,16 @@ export async function validateDocument(
   documentId: string,
   autoFix = false,
 ): Promise<ValidationResult[]> {
-  const res = await apiClient.post<ValidationResult[]>("/validate", {
-    document_id: documentId,
-    auto_fix: autoFix,
-  }, {
-    timeout: 0,
-  });
+  const res = await apiClient.post<ValidationResult[]>(
+    "/validate",
+    {
+      document_id: documentId,
+      auto_fix: autoFix,
+    },
+    {
+      timeout: 0,
+    },
+  );
   return res.data;
 }
 
@@ -447,9 +553,62 @@ export async function getSegments(
   status?: string,
   type?: string,
 ): Promise<Segment[]> {
-  const res = await apiClient.get<Segment[]>(`/segments/${docId}`, {
-    params: { status, type },
+  const key = `getSegments:${docId}:${status ?? ""}:${type ?? ""}`;
+  return deduplicate(key, async () => {
+    const res = await apiClient.get<Segment[]>(`/segments/${docId}`, {
+      params: { status, type },
+    });
+    return res.data;
   });
+}
+
+export async function getCollaborationState(
+  documentId: string,
+): Promise<CollaborationStateResponse> {
+  const res = await apiClient.get<CollaborationStateResponse>(
+    `/collaboration/document/${documentId}`,
+    { timeout: 0 },
+  );
+  return res.data;
+}
+
+export async function assignSegments(
+  documentId: string,
+  segmentIds: string[],
+  assigneeClerkUserId: string,
+): Promise<{ document_id: string; assignments: CollaborationAssignment[] }> {
+  const res = await apiClient.post<{
+    document_id: string;
+    assignments: CollaborationAssignment[];
+  }>(
+    "/collaboration/assign",
+    {
+      document_id: documentId,
+      segment_ids: segmentIds,
+      assignee_clerk_user_id: assigneeClerkUserId,
+    },
+    { timeout: 0 },
+  );
+  return res.data;
+}
+
+export async function claimSegments(
+  documentId: string,
+  segmentIds: string[],
+  assigneeClerkUserId: string,
+): Promise<{ document_id: string; assignments: CollaborationAssignment[] }> {
+  const res = await apiClient.post<{
+    document_id: string;
+    assignments: CollaborationAssignment[];
+  }>(
+    "/collaboration/claim",
+    {
+      document_id: documentId,
+      segment_ids: segmentIds,
+      assignee_clerk_user_id: assigneeClerkUserId,
+    },
+    { timeout: 0 },
+  );
   return res.data;
 }
 
@@ -500,9 +659,14 @@ export async function getExportStatus(
 export async function downloadExport(
   documentId: string,
   format: ExportFormat,
+  includeUntranslated?: boolean,
 ): Promise<string> {
+  const params = new URLSearchParams({ format });
+  if (includeUntranslated) {
+    params.append("include_untranslated", "true");
+  }
   const response = await apiClient.post<Blob>(
-    `/export/${documentId}?format=${format}`,
+    `/export/${documentId}?${params.toString()}`,
     undefined,
     {
       responseType: "blob",
@@ -550,15 +714,149 @@ export async function createShareLink(
   return response.json();
 }
 
-export async function getShareOverview(): Promise<ShareOverviewResponse> {
-  const response = await fetch("/api/shares", {
-    method: "GET",
-    cache: "no-store",
+export async function registerDocumentOwner(documentId: string): Promise<void> {
+  const response = await fetch("/api/documents/register", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ documentId }),
   });
 
   if (!response.ok) {
-    throw new Error("Failed to load share overview.");
+    throw new Error("Failed to register document owner.");
+  }
+}
+
+export async function getDocumentCollaborators(
+  documentId: string,
+): Promise<DocumentCollaboratorsResponse> {
+  const key = `getCollaborators:${documentId}`;
+  return deduplicate(key, async () => {
+    const response = await fetch(`/api/documents/${documentId}/collaborators`, {
+      method: "GET",
+      cache: "no-store",
+    });
+
+    if (!response.ok) {
+      throw new Error("Failed to load collaborators.");
+    }
+
+    return response.json();
+  });
+}
+
+export async function addDocumentCollaborator(
+  documentId: string,
+  email: string,
+  role: Exclude<CollaboratorRole, "owner">,
+): Promise<DocumentCollaboratorsResponse> {
+  const response = await fetch(`/api/documents/${documentId}/collaborators`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ email, role }),
+  });
+
+  if (!response.ok) {
+    const payload = (await response.json().catch(() => null)) as {
+      error?: string;
+    } | null;
+    throw new Error(payload?.error || "Failed to add collaborator.");
   }
 
   return response.json();
+}
+
+export async function removeDocumentCollaborator(
+  documentId: string,
+  collaboratorClerkUserId: string,
+): Promise<DocumentCollaboratorsResponse> {
+  const response = await fetch(`/api/documents/${documentId}/collaborators`, {
+    method: "DELETE",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ collaboratorClerkUserId }),
+  });
+
+  if (!response.ok) {
+    const payload = (await response.json().catch(() => null)) as {
+      error?: string;
+    } | null;
+    throw new Error(payload?.error || "Failed to remove collaborator.");
+  }
+
+  return response.json();
+}
+
+export async function getDocumentPresence(
+  documentId: string,
+): Promise<DocumentPresenceResponse> {
+  const key = `getPresence:${documentId}`;
+  return deduplicate(key, async () => {
+    const response = await fetch(`/api/documents/${documentId}/presence`, {
+      method: "GET",
+      cache: "no-store",
+    });
+
+    if (!response.ok) {
+      const payload = (await response.json().catch(() => null)) as {
+        error?: string;
+      } | null;
+      throw new Error(payload?.error || "Failed to load presence.");
+    }
+
+    return response.json();
+  });
+}
+
+export async function heartbeatDocumentPresence(
+  documentId: string,
+): Promise<DocumentPresenceResponse> {
+  const response = await fetch(`/api/documents/${documentId}/presence`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+  });
+
+  if (!response.ok) {
+    const payload = (await response.json().catch(() => null)) as {
+      error?: string;
+    } | null;
+    throw new Error(payload?.error || "Failed to update presence.");
+  }
+
+  return response.json();
+}
+
+export async function clearDocumentPresence(documentId: string): Promise<void> {
+  const response = await fetch(`/api/documents/${documentId}/presence`, {
+    method: "DELETE",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    keepalive: true,
+  });
+
+  if (!response.ok) {
+    throw new Error("Failed to clear presence.");
+  }
+}
+
+export async function getShareOverview(): Promise<ShareOverviewResponse> {
+  return deduplicate("getShareOverview", async () => {
+    const response = await fetch("/api/shares", {
+      method: "GET",
+      cache: "no-store",
+    });
+
+    if (!response.ok) {
+      throw new Error("Failed to load share overview.");
+    }
+
+    return response.json();
+  });
 }

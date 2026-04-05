@@ -1,35 +1,50 @@
-import useSWR from 'swr'
-import { getDocuments, getShareOverview, type DocumentSummary, type ShareOverviewResponse } from '@/lib/api'
+import { useEffect, useCallback } from 'react'
+import { useDashboardStore } from '@/store/use-dashboard-store'
 
 export function useDocuments() {
-  const { data, error, isLoading, mutate } = useSWR<DocumentSummary[]>('/documents', getDocuments, {
-    revalidateOnFocus: false,
-    revalidateIfStale: false,
-    dedupingInterval: 10000, // 10 seconds deduping
-  })
+  const { 
+    documents, 
+    isLoadingDocs, 
+    errorDocs, 
+    fetchDocuments 
+  } = useDashboardStore()
+
+  useEffect(() => {
+    fetchDocuments()
+  }, [fetchDocuments])
+
+  const mutate = useCallback(async () => {
+    await fetchDocuments(true)
+  }, [fetchDocuments])
 
   return {
-    documents: data || [],
-    isLoading,
-    isError: error,
+    documents,
+    isLoading: isLoadingDocs,
+    isError: errorDocs,
     mutate,
   }
 }
 
 export function useShareOverview() {
-  const { data, error, isLoading, mutate } = useSWR<ShareOverviewResponse>('/api/shares', getShareOverview, {
-    revalidateOnFocus: false,
-    revalidateIfStale: false,
-  })
+  const { 
+    shareOverview, 
+    isLoadingShares, 
+    errorShares, 
+    fetchShareOverview 
+  } = useDashboardStore()
+
+  useEffect(() => {
+    fetchShareOverview()
+  }, [fetchShareOverview])
+
+  const mutate = useCallback(async () => {
+    await fetchShareOverview(true)
+  }, [fetchShareOverview])
 
   return {
-    shareOverview: data || {
-      ownedByDocument: {},
-      visibleByDocument: {},
-      receivedDocumentIds: [],
-    },
-    isLoading,
-    isError: error,
+    shareOverview,
+    isLoading: isLoadingShares,
+    isError: errorShares,
     mutate,
   }
 }

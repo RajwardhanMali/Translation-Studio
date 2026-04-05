@@ -11,7 +11,8 @@ import { Card } from '@/components/ui/card'
 import { Progress } from '@/components/ui/progress'
 import { Badge } from '@/components/ui/badge'
 import { useToast } from '@/hooks/use-toast'
-import { uploadDocument } from '@/lib/api'
+import { registerDocumentOwner, uploadDocument } from '@/lib/api'
+import { useDashboardStore } from '@/store/use-dashboard-store'
 import { cn } from '@/lib/utils'
 
 type UploadState = 'idle' | 'dragging' | 'uploading' | 'success' | 'error'
@@ -97,13 +98,26 @@ export default function UploadPage() {
       }, 200)
 
       const result = await uploadDocument(selectedFile, (p: number) => setProgress(p))
+      try {
+        await registerDocumentOwner(result.document_id)
+      } catch {
+        toast({
+          title: 'Ownership setup delayed',
+          description: 'The document uploaded successfully, but collaborator ownership could not be registered yet.',
+          variant: 'destructive',
+        })
+      }
       clearInterval(fakeInterval)
       setProgress(100)
       setUploadResult(result)
       setUploadState('success')
       toast({ title: 'Upload successful', description: `${result.blocks_parsed} blocks parsed.` })
+      
+      // Invalidate dashboard cache so new document appears without refresh
+      const { fetchDocuments } = useDashboardStore.getState()
+      void fetchDocuments(true)
+      
       router.push(`/validate?doc=${result.document_id}`)
-      router.refresh()
     } catch {
       setUploadState('error')
       const msg =

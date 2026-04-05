@@ -14,6 +14,15 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models.domain import Document, Segment as SegmentDB
 from app.models.schemas import Segment, TranslateRequest, TranslateResponse
+from app.services.collaboration import (
+    attach_collaboration_fields,
+    enrich_collaborator,
+    ensure_collaboration_tables,
+    get_assignment_map,
+    get_current_backend_collaborator,
+    require_document_role,
+    require_segment_assignment,
+)
 from app.services.glossary_engine import (
     build_glossary_prompt_fragment,
     enforce_glossary,
@@ -348,7 +357,17 @@ async def translation_info():
 
 
 @router.post("", response_model=TranslateResponse)
-async def translate_document(request: TranslateRequest, db: Session = Depends(get_db)):
+async def translate_document(
+    request: TranslateRequest,
+    db: Session = Depends(get_db),
+    collaborator=Depends(get_current_backend_collaborator),
+):
+    ensure_collaboration_tables(db)
+    collaborator = enrich_collaborator(db, collaborator)
+    membership = require_document_role(db, request.document_id, collaborator, ["owner", "editor"])
+    if request.segment_ids:
+        require_segment_assignment(db, request.document_id, request.segment_ids, collaborator, membership)
+
     (
         doc,
         db_segments,
@@ -385,15 +404,30 @@ async def translate_document(request: TranslateRequest, db: Session = Depends(ge
         f"Translation complete: {translated_count} segments translated. TM will be updated on approval."
     )
 
+    assignments = get_assignment_map(db, request.document_id)
+
     return TranslateResponse(
         document_id=request.document_id,
         segments_translated=translated_count,
-        segments=[Segment(**segment) for segment in all_segments],
+        segments=[
+            Segment(**attach_collaboration_fields(segment, assignments.get(segment["id"])))
+            for segment in all_segments
+        ],
     )
 
 
 @router.post("/stream")
-async def translate_document_stream(request: TranslateRequest, db: Session = Depends(get_db)):
+async def translate_document_stream(
+    request: TranslateRequest,
+    db: Session = Depends(get_db),
+    collaborator=Depends(get_current_backend_collaborator),
+):
+    ensure_collaboration_tables(db)
+    collaborator = enrich_collaborator(db, collaborator)
+    membership = require_document_role(db, request.document_id, collaborator, ["owner", "editor"])
+    if request.segment_ids:
+        require_segment_assignment(db, request.document_id, request.segment_ids, collaborator, membership)
+
     (
         doc,
         db_segments,
@@ -442,7 +476,13 @@ async def translate_document_stream(request: TranslateRequest, db: Session = Dep
             translated_count += batch_result["translated_count"]
             completed += len(updated_segments)
 
+            assignments = get_assignment_map(db, request.document_id)
+
             for updated_segment in sort_segments(updated_segments):
+                payload = attach_collaboration_fields(
+                    updated_segment,
+                    assignments.get(updated_segment["id"]),
+                )
                 yield _stream_event(
                     "segment",
                     document_id=request.document_id,
@@ -450,7 +490,7 @@ async def translate_document_stream(request: TranslateRequest, db: Session = Dep
                     index=all_segment_indexes.get(updated_segment["id"], completed - 1),
                     batch=batch_result["batch_index"],
                     total_batches=batch_result["total_batches"],
-                    segment=updated_segment,
+                    segment=payload,
                 )
 
             yield _stream_event(
