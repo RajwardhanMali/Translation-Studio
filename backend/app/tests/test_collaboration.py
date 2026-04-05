@@ -57,7 +57,6 @@ def test_claim_owner_is_forced_to_self(monkeypatch):
 
     captured = {}
 
-    monkeypatch.setattr("app.routers.collaboration.ensure_collaboration_tables", lambda db: None)
     monkeypatch.setattr("app.routers.collaboration.enrich_collaborator", lambda db, collaborator: owner)
     monkeypatch.setattr("app.routers.collaboration.require_document_role", lambda db, doc_id, collaborator, roles: membership)
     monkeypatch.setattr("app.routers.collaboration.validate_segment_ids_for_document", lambda db, doc_id, segment_ids: None)
@@ -93,7 +92,6 @@ def test_claim_editor_for_other_user_forbidden(monkeypatch):
     editor = BackendCollaborator(clerk_user_id="user-1", email="editor@test.com", name="Editor")
     membership = SimpleNamespace(role="editor")
 
-    monkeypatch.setattr("app.routers.collaboration.ensure_collaboration_tables", lambda db: None)
     monkeypatch.setattr("app.routers.collaboration.enrich_collaborator", lambda db, collaborator: editor)
     monkeypatch.setattr("app.routers.collaboration.require_document_role", lambda db, doc_id, collaborator, roles: membership)
     monkeypatch.setattr("app.routers.collaboration.validate_segment_ids_for_document", lambda db, doc_id, segment_ids: None)

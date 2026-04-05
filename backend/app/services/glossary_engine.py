@@ -6,6 +6,9 @@ and post-processes translations to enforce glossary constraints.
 
 import re
 import logging
+import time
+from copy import deepcopy
+from threading import Lock
 from typing import List, Dict, Optional, Tuple
 
 from app.database import SessionLocal
@@ -14,31 +17,61 @@ from app.models.domain import GlossaryTerm
 logger = logging.getLogger(__name__)
 
 
+_GLOSSARY_CACHE_TTL_SECONDS = 300
+_GLOSSARY_CACHE_LOCK = Lock()
+_GLOSSARY_CACHE: Optional[Dict] = None
+_GLOSSARY_CACHE_TS = 0.0
+
+
+def _build_glossary_payload(terms: List[GlossaryTerm]) -> Dict:
+    terms_list = []
+    for t in terms:
+        terms_list.append({
+            "id": t.id,
+            "source": t.source,
+            "target": t.target,
+            "language": t.language,
+            "domain": t.domain,
+            "notes": t.notes,
+        })
+    return {
+        "terms": terms_list,
+        "style_rules": [],  # Style rules are not modeled in Phase 1 DB migration
+    }
+
+
+def _invalidate_glossary_cache() -> None:
+    global _GLOSSARY_CACHE, _GLOSSARY_CACHE_TS
+    with _GLOSSARY_CACHE_LOCK:
+        _GLOSSARY_CACHE = None
+        _GLOSSARY_CACHE_TS = 0.0
+
+
 # ---------------------------------------------------------------------------
 # Load / save
 # ---------------------------------------------------------------------------
 
-def get_glossary() -> Dict:
+def get_glossary(force_refresh: bool = False) -> Dict:
     """Return the current glossary dict from database."""
+    global _GLOSSARY_CACHE, _GLOSSARY_CACHE_TS
+    now = time.time()
+    if not force_refresh:
+        with _GLOSSARY_CACHE_LOCK:
+            if _GLOSSARY_CACHE is not None and (now - _GLOSSARY_CACHE_TS) < _GLOSSARY_CACHE_TTL_SECONDS:
+                return deepcopy(_GLOSSARY_CACHE)
+
     db = SessionLocal()
     try:
         terms = db.query(GlossaryTerm).all()
-        terms_list = []
-        for t in terms:
-            terms_list.append({
-                "id": t.id,
-                "source": t.source,
-                "target": t.target,
-                "language": t.language,
-                "domain": t.domain,
-                "notes": t.notes
-            })
-        return {
-            "terms": terms_list,
-            "style_rules": [] # Style rules are not modeled in Phase 1 DB migration
-        }
+        payload = _build_glossary_payload(terms)
     finally:
         db.close()
+
+    with _GLOSSARY_CACHE_LOCK:
+        _GLOSSARY_CACHE = payload
+        _GLOSSARY_CACHE_TS = now
+
+    return deepcopy(payload)
 
 
 def add_term(term: Dict) -> Dict:
@@ -72,8 +105,9 @@ def add_term(term: Dict) -> Dict:
         db.commit()
     finally:
         db.close()
-        
-    return get_glossary()
+
+    _invalidate_glossary_cache()
+    return get_glossary(force_refresh=True)
 
 
 # ---------------------------------------------------------------------------

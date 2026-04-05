@@ -55,7 +55,6 @@ def test_owner_can_approve_segment_and_trigger_learning(monkeypatch):
     owner = BackendCollaborator(clerk_user_id="owner-1", email="owner@test.com", name="Owner")
     membership = SimpleNamespace(role="owner")
 
-    monkeypatch.setattr("app.routers.review.ensure_collaboration_tables", lambda _db: None)
     monkeypatch.setattr("app.routers.review.enrich_collaborator", lambda _db, collaborator: owner)
     monkeypatch.setattr(
         "app.routers.review.require_document_role",
@@ -104,7 +103,6 @@ def test_approve_accepts_owner_and_editor_roles(monkeypatch, role):
 
     collaborator = BackendCollaborator(clerk_user_id=f"{role}-1", email=f"{role}@test.com", name=role.title())
 
-    monkeypatch.setattr("app.routers.review.ensure_collaboration_tables", lambda _db: None)
     monkeypatch.setattr("app.routers.review.enrich_collaborator", lambda _db, _collaborator: collaborator)
 
     captured_roles = []

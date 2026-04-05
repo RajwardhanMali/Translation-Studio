@@ -182,6 +182,7 @@ class TranslateRequest(BaseModel):
     target_language: str = "fr"
     style_rules: List[str] = Field(default_factory=list)
     segment_ids: Optional[List[str]] = None   # translate only these segments
+    force_llm_segment_ids: Optional[List[str]] = None  # bypass TM lookup for these segment ids
     pre_validate: bool = False                # run AI validation before translation
 
 

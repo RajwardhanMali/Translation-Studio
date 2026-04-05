@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from threading import Lock
 from typing import Dict, List, Optional
 
 from fastapi import Header, HTTPException
@@ -17,6 +18,10 @@ from app.models.domain import (
 )
 
 
+_COLLAB_SCHEMA_READY = False
+_COLLAB_SCHEMA_LOCK = Lock()
+
+
 
 
 @dataclass
@@ -27,47 +32,56 @@ class BackendCollaborator:
 
 
 def ensure_collaboration_tables(db: Session) -> None:
-    statements = [
-        "CREATE EXTENSION IF NOT EXISTS pgcrypto",
-        """
-        CREATE TABLE IF NOT EXISTS document_collaborators (
-          id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-          document_id text NOT NULL,
-          collaborator_clerk_user_id text NOT NULL,
-          collaborator_email text NOT NULL,
-          collaborator_name text,
-          role text NOT NULL DEFAULT 'viewer',
-          added_by_clerk_user_id text NOT NULL,
-          created_at timestamptz NOT NULL DEFAULT now(),
-          updated_at timestamptz NOT NULL DEFAULT now()
-        )
-        """,
-        """
-        CREATE UNIQUE INDEX IF NOT EXISTS document_collaborators_doc_user_uidx
-        ON document_collaborators (document_id, collaborator_clerk_user_id)
-        """,
-        """
-        CREATE TABLE IF NOT EXISTS segment_assignments (
-          id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-          segment_id text NOT NULL,
-          document_id text NOT NULL,
-          assigned_to_clerk_user_id text NOT NULL,
-          assigned_to_email text NOT NULL,
-          assigned_to_name text,
-          assigned_by_clerk_user_id text NOT NULL,
-          created_at timestamptz NOT NULL DEFAULT now(),
-          updated_at timestamptz NOT NULL DEFAULT now()
-        )
-        """,
-        """
-        CREATE UNIQUE INDEX IF NOT EXISTS segment_assignments_segment_uidx
-        ON segment_assignments (segment_id)
-        """,
-    ]
+    global _COLLAB_SCHEMA_READY
+    if _COLLAB_SCHEMA_READY:
+        return
 
-    for statement in statements:
-        db.execute(text(statement))
-    db.commit()
+    with _COLLAB_SCHEMA_LOCK:
+        if _COLLAB_SCHEMA_READY:
+            return
+
+        statements = [
+            "CREATE EXTENSION IF NOT EXISTS pgcrypto",
+            """
+            CREATE TABLE IF NOT EXISTS document_collaborators (
+                id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+                document_id text NOT NULL,
+                collaborator_clerk_user_id text NOT NULL,
+                collaborator_email text NOT NULL,
+                collaborator_name text,
+                role text NOT NULL DEFAULT 'viewer',
+                added_by_clerk_user_id text NOT NULL,
+                created_at timestamptz NOT NULL DEFAULT now(),
+                updated_at timestamptz NOT NULL DEFAULT now()
+            )
+            """,
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS document_collaborators_doc_user_uidx
+            ON document_collaborators (document_id, collaborator_clerk_user_id)
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS segment_assignments (
+                id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+                segment_id text NOT NULL,
+                document_id text NOT NULL,
+                assigned_to_clerk_user_id text NOT NULL,
+                assigned_to_email text NOT NULL,
+                assigned_to_name text,
+                assigned_by_clerk_user_id text NOT NULL,
+                created_at timestamptz NOT NULL DEFAULT now(),
+                updated_at timestamptz NOT NULL DEFAULT now()
+            )
+            """,
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS segment_assignments_segment_uidx
+            ON segment_assignments (segment_id)
+            """,
+        ]
+
+        for statement in statements:
+            db.execute(text(statement))
+        db.commit()
+        _COLLAB_SCHEMA_READY = True
 
 
 def get_current_backend_collaborator(

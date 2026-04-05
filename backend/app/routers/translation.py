@@ -17,7 +17,6 @@ from app.models.schemas import Segment, TranslateRequest, TranslateResponse
 from app.services.collaboration import (
     attach_collaboration_fields,
     enrich_collaborator,
-    ensure_collaboration_tables,
     get_assignment_map,
     get_current_backend_collaborator,
     require_document_role,
@@ -29,7 +28,7 @@ from app.services.glossary_engine import (
     get_style_rules,
 )
 from app.services.llm_service import BATCH_SIZE, get_backend_info, translate_batch
-from app.services.rag_engine import classify_segment
+from app.services.rag_engine import classify_segment, store_translations_batch
 from app.services.validator import validate_segments
 from app.utils.embeddings import encode_texts
 from app.utils.segment_order import sort_segments
@@ -40,6 +39,13 @@ router = APIRouter(prefix="/translate", tags=["translation"])
 
 def _stream_event(event_type: str, **payload) -> str:
     return json.dumps({"type": event_type, **payload}) + "\n"
+
+
+def _segment_group_key(segment: Dict) -> str:
+    source_text = segment.get("text", "").strip()
+    if segment.get("force_llm"):
+        return f"{source_text}::__force__:{segment.get('id', '')}"
+    return source_text
 
 
 def _serialize_db_segment(segment: SegmentDB) -> Dict:
@@ -103,6 +109,7 @@ def _prepare_translation_context(
     metadata = doc.metadata_json or {}
     prev_language = metadata.get("target_language", "")
     target_ids = set(request.segment_ids) if request.segment_ids else None
+    force_llm_ids = set(request.force_llm_segment_ids or [])
     effective_rules = request.style_rules or get_style_rules()
     classification = doc.metadata_json.get("classification", {}) if doc.metadata_json else {}
     document_domain = classification.get("domain")
@@ -157,6 +164,7 @@ def _prepare_translation_context(
         if not segment.get("text", "").strip():
             continue
 
+        segment["force_llm"] = segment["id"] in force_llm_ids
         segment["glossary_fragment"] = glossary_fragment
         to_translate.append(segment)
 
@@ -178,24 +186,33 @@ def _classify_translation_memory(
 ) -> List[Dict]:
     unique_groups: Dict[str, List[Dict]] = {}
     for segment in segments:
-        text = segment.get("text", "").strip()
-        unique_groups.setdefault(text, []).append(segment)
+        group_key = _segment_group_key(segment)
+        unique_groups.setdefault(group_key, []).append(segment)
 
     unique_segments = [group[0] for group in unique_groups.values() if group]
     if not unique_segments:
         return []
 
-    sources = [segment["text"].strip() for segment in unique_segments]
-    try:
-        embeddings = encode_texts(sources)
-    except Exception as exc:
-        logger.error(f"Batch embedding failed: {exc}")
-        embeddings = None
+    embeddable_segments = [segment for segment in unique_segments if not segment.get("force_llm")]
+    embeddings_by_id: Dict[str, object] = {}
+    if embeddable_segments:
+        try:
+            sources = [segment["text"].strip() for segment in embeddable_segments]
+            embeddings = encode_texts(sources)
+            embeddings_by_id = {
+                segment["id"]: embedding
+                for segment, embedding in zip(embeddable_segments, embeddings)
+            }
+        except Exception as exc:
+            logger.error(f"Batch embedding failed: {exc}")
 
-    for index, segment in enumerate(unique_segments):
-        if embeddings is not None:
+    for segment in unique_segments:
+        group_key = _segment_group_key(segment)
+        if segment.get("force_llm"):
+            match_type, tm_translation, score = "new", None, 0.0
+        elif segment.get("id") in embeddings_by_id:
             try:
-                embedding = embeddings[index]
+                embedding = embeddings_by_id[segment["id"]]
                 match_type, tm_translation, score = classify_segment(
                     segment["text"],
                     embedding,
@@ -207,7 +224,7 @@ def _classify_translation_memory(
         else:
             match_type, tm_translation, score = "new", None, 0.0
 
-        for grouped_segment in unique_groups.get(segment["text"].strip(), []):
+        for grouped_segment in unique_groups.get(group_key, []):
             grouped_segment["tm_match_type"] = match_type
             grouped_segment["tm_score"] = round(score, 4)
             grouped_segment["tm_translation"] = tm_translation
@@ -226,8 +243,8 @@ def _finalize_translated_segments(
     translated_count = 0
 
     for unique_segment in unique_batch:
-        source_text = unique_segment.get("text", "").strip()
-        grouped_segments = unique_groups.get(source_text, [])
+        group_key = _segment_group_key(unique_segment)
+        grouped_segments = unique_groups.get(group_key, [])
         raw_translation = unique_segment.get("translated_text", "")
 
         for segment in grouped_segments:
@@ -255,30 +272,30 @@ def _finalize_translated_segments(
     return updated_segments, translated_count
 
 
-def _finalize_exact_tm_segments(
+def _finalize_tm_segments(
     unique_segments: List[Dict],
     to_translate: List[Dict],
     all_segments: List[Dict],
 ) -> Tuple[List[Dict], List[Dict], int]:
     unique_groups: Dict[str, List[Dict]] = {}
     for segment in to_translate:
-        unique_groups.setdefault(segment.get("text", "").strip(), []).append(segment)
+        unique_groups.setdefault(_segment_group_key(segment), []).append(segment)
 
     all_segments_by_id = {segment["id"]: segment for segment in all_segments}
-    exact_unique_segments: List[Dict] = []
+    tm_unique_segments: List[Dict] = []
     remaining_unique_segments: List[Dict] = []
     updated_segments: List[Dict] = []
     translated_count = 0
 
     for unique_segment in unique_segments:
-        if unique_segment.get("tm_match_type") == "exact" and unique_segment.get("tm_translation"):
-            exact_unique_segments.append(unique_segment)
+        if unique_segment.get("tm_match_type") in {"exact", "fuzzy"} and unique_segment.get("tm_translation"):
+            tm_unique_segments.append(unique_segment)
         else:
             remaining_unique_segments.append(unique_segment)
 
-    for unique_segment in exact_unique_segments:
-        source_text = unique_segment.get("text", "").strip()
-        grouped_segments = unique_groups.get(source_text, [])
+    for unique_segment in tm_unique_segments:
+        group_key = _segment_group_key(unique_segment)
+        grouped_segments = unique_groups.get(group_key, [])
         tm_translation = unique_segment.get("tm_translation", "")
 
         for segment in grouped_segments:
@@ -303,23 +320,23 @@ def _run_translation_batches(
 ):
     unique_groups: Dict[str, List[Dict]] = {}
     for segment in to_translate:
-        unique_groups.setdefault(segment.get("text", "").strip(), []).append(segment)
+        unique_groups.setdefault(_segment_group_key(segment), []).append(segment)
 
     unique_segments = _classify_translation_memory(to_translate, target_language)
     all_segments_by_id = {segment["id"]: segment for segment in all_segments}
-    exact_tm_segments, remaining_unique_segments, exact_translated_count = _finalize_exact_tm_segments(
+    tm_segments, remaining_unique_segments, tm_translated_count = _finalize_tm_segments(
         unique_segments=unique_segments,
         to_translate=to_translate,
         all_segments=all_segments,
     )
 
-    if exact_tm_segments:
+    if tm_segments:
         yield {
-            "kind": "exact_tm",
+            "kind": "tm_match",
             "batch_index": 0,
             "total_batches": 0,
-            "updated_segments": exact_tm_segments,
-            "translated_count": exact_translated_count,
+            "updated_segments": tm_segments,
+            "translated_count": tm_translated_count,
         }
 
     total_batches = (
@@ -351,6 +368,14 @@ def _run_translation_batches(
         }
 
 
+def _store_tm_from_segments(segments: List[Dict], target_language: str) -> None:
+    try:
+        added = store_translations_batch(segments=segments, target_language=target_language)
+        logger.info(f"TM auto-store completed: {added} entries added for language {target_language}.")
+    except Exception as exc:
+        logger.warning(f"TM auto-store failed: {exc}")
+
+
 @router.get("/info")
 async def translation_info():
     return get_backend_info()
@@ -362,7 +387,6 @@ async def translate_document(
     db: Session = Depends(get_db),
     collaborator=Depends(get_current_backend_collaborator),
 ):
-    ensure_collaboration_tables(db)
     collaborator = enrich_collaborator(db, collaborator)
     membership = require_document_role(db, request.document_id, collaborator, ["owner", "editor"])
     if request.segment_ids:
@@ -399,6 +423,7 @@ async def translate_document(
         _persist_segments(db_segments_by_id, batch_result["updated_segments"])
 
     db.commit()
+    _store_tm_from_segments(all_segments, request.target_language)
 
     logger.info(
         f"Translation complete: {translated_count} segments translated. TM will be updated on approval."
@@ -422,7 +447,6 @@ async def translate_document_stream(
     db: Session = Depends(get_db),
     collaborator=Depends(get_current_backend_collaborator),
 ):
-    ensure_collaboration_tables(db)
     collaborator = enrich_collaborator(db, collaborator)
     membership = require_document_role(db, request.document_id, collaborator, ["owner", "editor"])
     if request.segment_ids:
@@ -446,6 +470,7 @@ async def translate_document_stream(
     db_segments_by_id = {segment.id: segment for segment in db_segments}
     all_segment_indexes = {segment["id"]: index for index, segment in enumerate(all_segments)}
     total_segments = len(to_translate)
+    assignments = get_assignment_map(db, request.document_id)
 
     def generate():
         yield _stream_event(
@@ -476,8 +501,6 @@ async def translate_document_stream(
             translated_count += batch_result["translated_count"]
             completed += len(updated_segments)
 
-            assignments = get_assignment_map(db, request.document_id)
-
             for updated_segment in sort_segments(updated_segments):
                 payload = attach_collaboration_fields(
                     updated_segment,
@@ -503,6 +526,8 @@ async def translate_document_stream(
 
         if not to_translate:
             db.commit()
+
+        _store_tm_from_segments(all_segments, request.target_language)
 
         yield _stream_event(
             "complete",
